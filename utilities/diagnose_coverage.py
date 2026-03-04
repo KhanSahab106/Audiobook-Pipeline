@@ -23,6 +23,9 @@ import json
 # ── Add project root to path ──────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Resolve the project root regardless of the working directory when the script is run.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 # ── Minimal parser re-run (no TTS) ─────────────────────────────────────────
 from parser import parse_chapter, reset_token_tracker
 from registry import load_registry, get_known_characters
@@ -145,8 +148,9 @@ def main():
         "partial_sentences": [s for s, _ in partial],
     }
 
-    os.makedirs("data", exist_ok=True)
-    report_path = "data/coverage_report.json"
+    data_dir    = os.path.join(ROOT, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    report_path = os.path.join(data_dir, "coverage_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
