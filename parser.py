@@ -25,7 +25,8 @@ Functions:
     _extract_and_validate(raw, index_offset) — Parse raw JSON into validated segments.
     _extract_partial_segments(json_str) — Regex-based last-resort segment recovery.
     _validate_segments(segments, index_offset) — Sanitise and normalise segment fields.
-    _merge_short_segments(segments)   — Merge consecutive short same-speaker segments.
+    _normalize_probe(text)            — Build a short fingerprint for paragraph-boundary detection.
+    _merge_short_segments(segments, source_text) — Merge consecutive short same-speaker segments.
 """
 
 import json
@@ -84,6 +85,8 @@ def _get_client() -> Groq:
 COVERAGE_THRESHOLD = 0.92   # trigger repair if word coverage falls below this
 PARA_MIN_WORDS     = 0      # ignore paragraphs shorter than this (titles, etc.)
 PARA_MISS_RATIO    = 0.50   # a paragraph is "missing" if <50% of its words are covered
+# ── Merge config ──────────────────────────────────────────────────────────────
+MERGE_CAP          = 400    # stop merging into a segment once it exceeds this length
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -218,7 +221,7 @@ def parse_chapter(text: str, known_characters: list[str]) -> list[dict]:
     segments = _inject_missing_narration(text, segments)
 
     # ── Final pass: merge + re-index ─────────────────────────────────────
-    segments = _merge_short_segments(segments)
+    segments = _merge_short_segments(segments, text)
     for i, seg in enumerate(segments):
         seg["index"] = i
 
@@ -812,23 +815,69 @@ def _validate_segments(segments: list, index_offset: int = 0) -> list:
     return cleaned
 
 
-def _merge_short_segments(segments: list) -> list:
+def _normalize_probe(text: str) -> str:
+    """Return first ~40 chars, lowercased and punctuation-stripped, as a paragraph fingerprint."""
+    cleaned = re.sub(r"[^\w\s]", "", text.lower()).strip()
+    return cleaned[:40]
+
+
+def _merge_short_segments(segments: list[dict], source_text: str) -> list[dict]:
     """
-    Merge consecutive same-speaker/tone/type segments
-    where the incoming segment text is under 120 chars.
+    Merge consecutive same-speaker/tone/type segments where the incoming
+    segment text is under 120 chars, subject to:
+      - Chapter heading protection: the first segment (index 0) is never
+        merged into — it always remains its own segment.
+      - MERGE_CAP: once the accumulated segment exceeds MERGE_CAP chars,
+        stop merging UNLESS the incoming segment continues the same paragraph
+        (i.e. does not start a new paragraph boundary in source_text).
     """
-    merged = []
+    # Build a set of paragraph-start fingerprints from the source text
+    para_starts: set[str] = set()
+    for para in re.split(r"\n\n+", source_text):
+        para = para.strip()
+        if para:
+            para_starts.add(_normalize_probe(para))
+
+    merged: list[dict] = []
     for seg in segments:
-        if (
-            merged
-            and len(seg["text"]) < 120
-            and merged[-1]["speaker"] == seg["speaker"]
-            and merged[-1]["tone"]    == seg["tone"]
-            and merged[-1]["type"]    == seg["type"]
-        ):
-            merged[-1]["text"] += " " + seg["text"].strip()
-        else:
+        if not merged:
+            # Always start a fresh list with the first segment (chapter heading protection)
             merged.append(seg)
+            continue
+
+        # Rule 1: chapter heading protection — the heading is always merged[-1] when
+        #         len(merged) == 1, so the very next segment must start its own entry.
+        if len(merged) == 1:
+            merged.append(seg)
+            continue
+
+        # Rule 2: incoming segment is too large to merge
+        if len(seg["text"]) >= 120:
+            merged.append(seg)
+            continue
+
+        # Rule 3: speaker / tone / type must match
+        if (
+            merged[-1]["speaker"] != seg["speaker"]
+            or merged[-1]["tone"]  != seg["tone"]
+            or merged[-1]["type"]  != seg["type"]
+        ):
+            merged.append(seg)
+            continue
+
+        # Rule 4: under MERGE_CAP — always merge
+        if len(merged[-1]["text"]) < MERGE_CAP:
+            merged[-1]["text"] += " " + seg["text"].strip()
+            continue
+
+        # Rule 5: over MERGE_CAP — check paragraph boundary
+        probe = _normalize_probe(seg["text"])
+        if probe in para_starts:
+            # Incoming segment starts a new paragraph → clean break
+            merged.append(seg)
+        else:
+            # Mid-paragraph continuation → keep merging to avoid cutting mid-para
+            merged[-1]["text"] += " " + seg["text"].strip()
 
     for i, seg in enumerate(merged):
         seg["index"] = i
