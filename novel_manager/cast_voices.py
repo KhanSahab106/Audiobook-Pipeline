@@ -35,7 +35,10 @@ from novel_manager.gemini_client import call_gemini
 from novel_manager.novel_utils   import read_novel_md
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-VOICES_MD_PATH = "voices.md"   # project root — shared across all novels
+# Resolve voices.md relative to the project root so the script works regardless
+# of the working directory from which it is invoked.
+_ROOT          = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+VOICES_MD_PATH = os.path.join(_ROOT, "voices.md")
 
 # Always fixed — never touched by casting
 FIXED_ASSIGNMENTS = {

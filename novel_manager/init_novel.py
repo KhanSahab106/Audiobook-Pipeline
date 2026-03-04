@@ -316,7 +316,7 @@ def run_text_mode(
 
     ch_nums       = [n for n, _ in chapters]
     chapters_text = load_chapters_text(chapters)
-    total_words   = sum(len(open(f).read().split()) for _, f in chapters)
+    total_words   = sum(len(open(f, encoding="utf-8").read().split()) for _, f in chapters)
 
     print(f"\n  Reading chapters {ch_nums[0]}–{ch_nums[-1]} "
           f"({len(chapters)} files, {total_words:,} words)")
