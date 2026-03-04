@@ -11,7 +11,7 @@ trailing noise trimming to remove hallucinated audio.
 triumphant — by tuning XTTS inference parameters per tone.
 
 Functions:
-    _clean_text_for_tts(text)         — Normalise stutters, encoding, punctuation for TTS.
+    clean_text_for_tts(text)          — Normalise stutters, encoding, punctuation for TTS.
     load_tts()                        — Load XTTS v2 model and config; return (model, config).
     _split_for_xtts(text)             — Split text into chunks under the XTTS char limit.
     _trim_trailing_noise(wav, text, sr) — Trim hallucinated trailing audio via duration cap + energy fade.
@@ -69,7 +69,7 @@ TONE_PROFILES = {
 }
 
 
-def _clean_text_for_tts(text: str) -> str:
+def clean_text_for_tts(text: str) -> str:
     """Normalize text for natural TTS output (stutters, encoding, punctuation)."""
     # Remove square brackets — XTTS treats them as special tokens, causing
     # mispronunciation of the first word (e.g. "[The host..." → "theaah")
@@ -277,7 +277,7 @@ def _infer(
 
 
 def render_segment(model, config, text: str, speaker: str, tone: str) -> np.ndarray:
-    text      = _clean_text_for_tts(text)
+    text      = clean_text_for_tts(text)
     profile   = TONE_PROFILES.get(tone, TONE_PROFILES["neutral"])
     chunks    = _split_for_xtts(text)
     gap       = np.zeros(int(SAMPLE_RATE * SUBSEG_GAP_MS / 1000), dtype=np.float32)

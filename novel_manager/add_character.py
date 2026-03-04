@@ -10,7 +10,6 @@ Functions:
     extract_overview(novel_md)        — Pull the Overview section from novel.md.
     character_already_in_novel_md(novel_md, character_key) — Check if character already exists.
     insert_character_entry(novel_md, entry) — Insert new entry into the Characters section.
-    parse_chapter_range(arg)          — Parse chapter range argument.
     main()                            — CLI entry point.
 
 Usage:
@@ -29,7 +28,7 @@ from novel_manager.gemini_client import call_gemini
 from novel_manager.novel_utils   import (
     get_chapters_in_range, get_all_chapters,
     load_chapters_text, read_novel_md, write_novel_md,
-    get_last_updated_chapter
+    get_last_updated_chapter, parse_chapter_range
 )
 
 
@@ -136,15 +135,6 @@ def insert_character_entry(novel_md: str, entry: str) -> str:
 
     # Fallback: append to end
     return novel_md + f"\n\n{entry}\n"
-
-
-def parse_chapter_range(arg: str) -> tuple[int, int | None]:
-    if "-" in arg:
-        parts = arg.split("-", 1)
-        start = int(parts[0]) if parts[0] else 1
-        end   = int(parts[1]) if parts[1] else None
-        return start, end
-    return int(arg), int(arg)
 
 
 def main():

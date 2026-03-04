@@ -36,6 +36,9 @@ from bs4 import BeautifulSoup
 # ── Add project root to path ──────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Resolve the project root regardless of the working directory when the script is run.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 from novel_manager.novel_utils import get_all_chapters
 
 
@@ -377,7 +380,7 @@ def main():
     parser = build_parser()
     args   = parser.parse_args()
 
-    novel_dir = os.path.join("novels", args.novel)
+    novel_dir = os.path.join(ROOT, "novels", args.novel)
     if not os.path.isdir(novel_dir):
         print(f"  Error: Novel directory not found: {novel_dir}")
         print(f"  Run first: python setup_novel.py {args.novel}")

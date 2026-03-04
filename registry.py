@@ -146,12 +146,16 @@ def load_registry(novel_dir: str) -> dict:
             data.pop("pool_index", None)
             save_registry(data, novel_dir)
             print("  Registry migrated to gender-aware pool format.")
+        # Ensure dormant_voices key exists (backward compatible)
+        if "dormant_voices" not in data:
+            data["dormant_voices"] = {}
         return data
 
     # First run — seed with fixed assignments only
     registry = {
         "novel_dir":         novel_dir,
         "characters":        {},
+        "dormant_voices":    {},
         "female_pool_index": 1,   # index 0 (Ana Florence) reserved for narrator
         "male_pool_index":   0,
     }
@@ -236,6 +240,22 @@ def resolve_speaker(speaker_name: str, registry: dict, novel_dir: str) -> str:
             # Silently return — Gemini cast, no noise needed
             pass
         return entry["xtts_speaker"]
+
+    # ── Dormant character spoke unexpectedly mid-batch ────────────────────
+    # Restore their voice slot so the pipeline doesn't fall back to narrator.
+    dormant_voices = registry.get("dormant_voices", {})
+    if name in dormant_voices:
+        saved = dormant_voices.pop(name)
+        voice = saved["xtts_speaker"]
+        registry["characters"][name] = {
+            "xtts_speaker": voice,
+            "gender":       saved.get("gender", "unknown"),
+            "cast_by":      "dormancy_restore",
+        }
+        save_registry(registry, novel_dir)
+        print(f"  Dormant character '{name}' spoke — reactivated with voice {voice}.")
+        print(f"    Run update_novel.py to update novel.md.")
+        return voice
 
     # ── Alias matching ────────────────────────────────────────────────────
     # The parser often outputs short names (e.g. "christopher") while

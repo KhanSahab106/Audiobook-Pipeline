@@ -34,8 +34,10 @@ from TTS.tts.models.xtts import Xtts
 
 MODEL_DIR   = r"C:\Users\ABRAR\AppData\Local\tts\tts_models--multilingual--multi-dataset--xtts_v2"
 SPEAKERS_FILE = os.path.join(MODEL_DIR, "speakers_xtts.pth")
-VOICES_MD   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voices.md")
-TEST_OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_tests")
+# Resolve the project root regardless of the working directory when the script is run.
+ROOT        = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+VOICES_MD   = os.path.join(ROOT, "voices.md")
+TEST_OUTPUT = os.path.join(ROOT, "voice_tests")
 SAMPLE_RATE = 24000
 
 

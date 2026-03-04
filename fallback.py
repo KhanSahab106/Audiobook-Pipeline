@@ -7,7 +7,6 @@ fails. Stages: normal render → text cleanup → sentence splitting → narrato
 fallback → audible placeholder tone.
 
 Functions:
-    clean_text_for_tts(text)          — Sanitise stutters, non-ASCII, repeated punctuation.
     split_segment_text(text, max_chars) — Split text at sentence boundaries into smaller chunks.
     generate_placeholder(duration_ms)  — Create a 440 Hz tone placeholder for failed segments.
     _try_render(tts, tts_config, text, speaker, tone, label) — Attempt render with retries.
@@ -17,7 +16,7 @@ Functions:
 import time
 import numpy as np
 import re
-from renderer import render_segment
+from renderer import render_segment, clean_text_for_tts
 
 # ── Config ──────────────────────────────────────────────────────────────────
 MAX_RETRIES     = 3
@@ -30,24 +29,8 @@ FALLBACK_SPEAKER = "Ana Florence"
 # ═══════════════════════════════════════════════════════════════════════════
 #  TEXT UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════
-
-def clean_text_for_tts(text: str) -> str:
-    """
-    Sanitize text that may be causing TTS failures.
-    - Normalize stutters (w-who → who, I-I → I)
-    - Strip non-ASCII characters
-    - Collapse multiple spaces
-    - Remove excessive repeated punctuation
-    """
-    # Stutters: single letter(s) + hyphen + word starting with same letter
-    # e.g. "w-who" → "who", "s-stop" → "stop", "th-the" → "the"
-    text = re.sub(r"\b([a-zA-Z]{1,3})-(?=\1)", "", text, flags=re.IGNORECASE)
-    # Repeated word stutters: "I-I" → "I", "no-no" → "no"
-    text = re.sub(r"\b(\w+)(?:-\1)+\b", r"\1", text, flags=re.IGNORECASE)
-    text = text.encode("ascii", "ignore").decode("ascii")
-    text = re.sub(r" +", " ", text)
-    text = re.sub(r"([.!?,]){3,}", r"\1\1", text)
-    return text.strip()
+# clean_text_for_tts is imported from renderer — single definition shared
+# across all render paths.
 
 
 def split_segment_text(text: str, max_chars: int = 200) -> list[str]:

@@ -145,8 +145,9 @@ def main():
         "partial_sentences": [s for s, _ in partial],
     }
 
-    os.makedirs("data", exist_ok=True)
-    report_path = "data/coverage_report.json"
+    data_dir    = os.path.join(novel_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    report_path = os.path.join(data_dir, "coverage_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 

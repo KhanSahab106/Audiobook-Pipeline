@@ -34,6 +34,10 @@ load_dotenv()
 
 # ── Add project root to path ──────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Resolve the project root regardless of the working directory when the script is run.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 from registry import load_registry, get_known_characters
 
 from groq import Groq
@@ -404,8 +408,9 @@ def print_raw(result: dict):
 
 def save_report(chapter_file: str, result: dict, segments: list, stats: dict):
     chapter_name = os.path.splitext(os.path.basename(chapter_file))[0]
-    out_path     = f"data/{chapter_name}_inspection.json"
-    os.makedirs("data", exist_ok=True)
+    data_dir     = os.path.join(ROOT, "data")
+    out_path     = os.path.join(data_dir, f"{chapter_name}_inspection.json")
+    os.makedirs(data_dir, exist_ok=True)
 
     report = {
         "chapter":       chapter_file,

@@ -13,6 +13,8 @@ import os
 import sys
 import re
 
+# Resolve the project root regardless of the working directory when the script is run.
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 NOVEL_MD_TEMPLATE = """\
 # {title}
@@ -91,7 +93,7 @@ def slugify(name: str) -> str:
 def setup_novel(raw_name: str):
     slug      = slugify(raw_name)
     title     = raw_name.title()
-    novel_dir = os.path.join("novels", slug)
+    novel_dir = os.path.join(ROOT, "novels", slug)
 
     dirs = [
         novel_dir,
