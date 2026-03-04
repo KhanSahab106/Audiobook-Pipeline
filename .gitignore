@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+
+# Novel data (large text/audio files)
+novels/
+
+# Temporary / scratch chapters
+New folder/
+
+# Secrets
+.env
+api.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

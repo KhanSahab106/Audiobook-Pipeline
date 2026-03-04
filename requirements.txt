@@ -1,0 +1,13 @@
+ollama 
+librosa 
+soundfile 
+scipy 
+pydub 
+numpy 
+torch
+TTS
+python-dotenv
+requests
+beautifulsoup4
+cloudscraper
+curl_cffi
