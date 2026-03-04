@@ -14,6 +14,7 @@ Functions:
     get_last_updated_chapter(novel_dir) — Parse last_updated_chapter from novel.md meta.
     write_novel_md(novel_dir, content, backup) — Write novel.md with optional backup.
     update_meta_field(content, field, value) — Update a field in the Meta section.
+    extract_character_last_updated(content) — Return {key: last_updated_chapter} for all characters.
 """
 
 import os
@@ -191,7 +192,8 @@ def _parse_character_entries(novel_md_content: str) -> dict[str, dict]:
         key  = blocks[i].strip()
         body = blocks[i + 1] if i + 1 < len(blocks) else ""
 
-        entry = {"status": "active", "confidence": "sparse", "role": "minor"}
+        entry = {"status": "active", "confidence": "sparse", "role": "minor",
+                 "last_updated_chapter": None}
 
         status_m = re.search(r'-\s*status:\s*(\w+)', body)
         if status_m:
@@ -204,6 +206,10 @@ def _parse_character_entries(novel_md_content: str) -> dict[str, dict]:
         role_m = re.search(r'-\s*role:\s*(.+)', body)
         if role_m:
             entry["role"] = role_m.group(1).strip().lower()
+
+        luc_m = re.search(r'-\s*last_updated_chapter:\s*(\d+)', body)
+        if luc_m:
+            entry["last_updated_chapter"] = int(luc_m.group(1))
 
         entries[key] = entry
 
@@ -235,4 +241,17 @@ def extract_reactivated(old_md: str, new_md: str) -> set[str]:
     new_dormant = extract_dormant_characters(new_md)
     return old_dormant - new_dormant
 
+
+def extract_character_last_updated(novel_md_content: str) -> dict[str, int]:
+    """
+    Return {character_key: last_updated_chapter_int} for all characters
+    that have a last_updated_chapter field.  Characters without the field
+    are omitted from the result.
+    """
+    entries = _parse_character_entries(novel_md_content)
+    return {
+        k: v["last_updated_chapter"]
+        for k, v in entries.items()
+        if v["last_updated_chapter"] is not None
+    }
 

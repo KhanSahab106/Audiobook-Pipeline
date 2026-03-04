@@ -8,6 +8,8 @@ and feeds only those to Gemini along with the current novel.md.
 Functions:
     build_prompt(current_novel_md, chapters_text, ch_start, ch_end) — Build the update prompt.
     parse_chapter_range(arg)          — Parse chapter range argument.
+    sync_speakers_json(novel_dir, old_md, new_md) — Sync dormant/reactivated/pruned voices.
+    prune_speakers_json(novel_dir, old_md, new_md) — Backward-compatible alias for sync_speakers_json.
     main()                            — CLI entry point.
 
 Usage:
@@ -28,7 +30,8 @@ from novel_manager.novel_utils   import (
     get_chapters_in_range, load_chapters_text,
     read_novel_md, write_novel_md, update_meta_field,
     get_last_updated_chapter, get_all_chapters,
-    extract_character_keys
+    extract_character_keys, extract_newly_dormant,
+    extract_reactivated
 )
 
 
@@ -78,24 +81,36 @@ FACTIONS — add newly introduced factions, update existing ones
 
 CHAPTER MAP — APPEND new chapter entries, never rewrite existing ones
 
-━━━ CHARACTER PRUNING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ CHARACTER DORMANCY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-To conserve voice slots, REMOVE character entries that meet ALL of these:
-  1. They have had NO ACTUAL DIALOGUE (quoted speech) for 50+ consecutive
-     chapters. Being mentioned by name does NOT save them from pruning —
-     only dialogue counts.
-  2. Their last_updated_chapter is 50+ chapters behind the LATEST chapter.
-  3. They are NOT narrator or system.
-  4. They were NOT introduced in the current batch of new chapters.
+Every character entry MUST have a `- status: active` or `- status: dormant` line.
 
-When removing a character:
-  - Delete their entire ### entry from ## Characters
-  - Do NOT add them elsewhere — they are fully removed
-  - List every pruned key in a ## Pruned Characters section at the very
-    bottom of the document, one per line, like:
+Mark a character as `status: dormant` when they exceed their tier's inactivity
+threshold (chapters since their last_updated_chapter with actual dialogue):
+
+  protagonist            → NEVER dormant
+  deuteragonist (S-Tier) → 200 chapters without dialogue
+  antagonist (S-Tier)    → 200 chapters without dialogue
+  major supporting (A-Tier) → 150 chapters without dialogue
+  supporting (B-Tier)    → 100 chapters without dialogue
+  minor (C-Tier)         → 50 chapters without dialogue
+  unspecified / unknown  → 30 chapters without dialogue
+
+Rules:
+  - Use last_updated_chapter (dialogue-only) to count silent chapters
+  - Reactivate a character (status: active) if they have dialogue in the
+    new chapters — even if they were previously dormant
+  - NEVER mark narrator or system as dormant
+  - NEVER mark characters introduced in the current batch as dormant
+  - When marking dormant, append to arc_notes:
+      Ch N: marked dormant (no dialogue since Ch X)
+  - When reactivating, append to arc_notes:
+      Ch N: reactivated
+  - Characters dormant for 2× their tier threshold (truly gone) may be moved
+    to a ## Pruned Characters section at the bottom:
       - character_key_name
-
-If no characters are pruned, omit the ## Pruned Characters section.
+    Only use this for characters clearly finished with the story.
+  - If no characters are pruned, omit ## Pruned Characters entirely.
 
 ━━━ WHAT NOT TO DO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -107,7 +122,8 @@ If no characters are pruned, omit the ## Pruned Characters section.
   ✗ Do not create entries for unknown/unnamed speakers
   ✗ Do not create new entries for aliases — merge into existing entries
   ✗ Do not invent information not in the text
-  ✗ Do not prune characters introduced in the current batch
+  ✗ Do not mark dormant characters introduced in the current batch
+  ✗ Do not mark narrator or system as dormant
 
 ━━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -118,6 +134,7 @@ Update last_updated_chapter and total_chapters_processed in the Meta section.
 CHARACTER ENTRY FORMAT:
 ### [lowercase_underscore_key]
 - confidence: [sparse / partial / complete]
+- status: [active / dormant]
 - introduced_chapter: [original — never change this]
 - role:
 - gender:
@@ -163,43 +180,113 @@ def parse_chapter_range(arg: str) -> tuple[int, int | None]:
     return int(arg), int(arg)
 
 
-def prune_speakers_json(novel_dir: str, old_md: str, new_md: str):
+def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
     """
-    Compare character keys before/after the Gemini update.
-    Remove pruned characters from speakers.json to free voice slots.
+    Sync speakers.json after a novel.md update.
+
+    Handles three cases:
+    1. Newly dormant characters — free voice slot, save to dormant_voices.
+    2. Reactivated characters   — restore from dormant_voices (or warn).
+    3. Fully pruned characters  — remove from both characters and dormant_voices.
     """
-    old_keys = extract_character_keys(old_md)
-    new_keys = extract_character_keys(new_md)
-    pruned   = old_keys - new_keys - {"narrator", "system"}
-
-    if not pruned:
-        return
-
     speakers_path = os.path.join(novel_dir, "data", "speakers.json")
     if not os.path.exists(speakers_path):
-        print(f"  ⚠ speakers.json not found — skipping voice cleanup")
+        print(f"  ⚠ speakers.json not found — skipping voice sync")
         return
 
     with open(speakers_path, "r", encoding="utf-8") as f:
         registry = json.load(f)
 
-    characters = registry.get("characters", {})
+    characters     = registry.get("characters", {})
+    dormant_voices = registry.setdefault("dormant_voices", {})
+
+    # ── 1. Newly dormant ────────────────────────────────────────────────────
+    newly_dormant = extract_newly_dormant(old_md, new_md) - {"narrator", "system"}
     freed = []
+    for key in newly_dormant:
+        if key in characters:
+            entry = characters[key]
+            dormant_voices[key] = {
+                "xtts_speaker":          entry.get("xtts_speaker", "?"),
+                "gender":                entry.get("gender", "unknown"),
+                "dormant_since_chapter": entry.get("last_updated_chapter"),
+            }
+            del characters[key]
+            freed.append((key, dormant_voices[key]["xtts_speaker"]))
+
+    # ── 2. Reactivated ──────────────────────────────────────────────────────
+    reactivated = extract_reactivated(old_md, new_md) - {"narrator", "system"}
+    restored = []
+    needs_cast = []
+    for key in reactivated:
+        if key in dormant_voices:
+            saved = dormant_voices.pop(key)
+            voice = saved["xtts_speaker"]
+            used  = {v["xtts_speaker"] for v in characters.values()}
+            if voice not in used:
+                characters[key] = {
+                    "xtts_speaker": voice,
+                    "gender":       saved.get("gender", "unknown"),
+                    "cast_by":      "dormancy_restore",
+                }
+                restored.append((key, voice))
+            else:
+                needs_cast.append(key)
+        else:
+            needs_cast.append(key)
+
+    # ── 3. Fully pruned ─────────────────────────────────────────────────────
+    old_keys = extract_character_keys(old_md)
+    new_keys = extract_character_keys(new_md)
+    pruned   = old_keys - new_keys - {"narrator", "system"}
+    removed  = []
     for key in pruned:
         if key in characters:
-            voice = characters[key].get("xtts_speaker", "?")
             del characters[key]
-            freed.append((key, voice))
+            removed.append(key)
+        if key in dormant_voices:
+            del dormant_voices[key]
+            if key not in removed:
+                removed.append(key)
 
-    if freed:
+    # ── Persist if anything changed ─────────────────────────────────────────
+    if freed or restored or removed or needs_cast:
         with open(speakers_path, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2, ensure_ascii=False)
 
+    if freed:
         print(f"\n  {'─' * 50}")
-        print(f"  �  Pruned {len(freed)} inactive character(s) from speakers.json:")
+        print(f"  → Freed {len(freed)} voice slot(s) for dormant character(s):")
         for key, voice in sorted(freed):
-            print(f"      {key:30s} → freed voice: {voice}")
+            print(f"      {key:30s} → dormant_voices (was: {voice})")
         print(f"  {'─' * 50}")
+
+    if restored:
+        print(f"\n  {'─' * 50}")
+        print(f"  ✓ Restored {len(restored)} reactivated character(s):")
+        for key, voice in sorted(restored):
+            print(f"      {key:30s} → {voice}")
+        print(f"  {'─' * 50}")
+
+    if needs_cast:
+        print(f"\n  {'─' * 50}")
+        print(f"  ⚠ {len(needs_cast)} reactivated character(s) need voice assignment:")
+        for key in sorted(needs_cast):
+            print(f"      {key}")
+        print(f"    Run cast_voices.py to assign voices.")
+        print(f"  {'─' * 50}")
+
+    if removed:
+        print(f"\n  {'─' * 50}")
+        print(f"  ✗ Removed {len(removed)} fully pruned character(s):")
+        for key in sorted(removed):
+            print(f"      {key}")
+        print(f"  {'─' * 50}")
+
+
+def prune_speakers_json(novel_dir: str, old_md: str, new_md: str):
+    """Backward-compatible wrapper — delegates to sync_speakers_json."""
+    sync_speakers_json(novel_dir, old_md, new_md)
 
 
 def main():
@@ -263,8 +350,8 @@ def main():
 
     write_novel_md(novel_dir, result)
 
-    # ── Prune inactive characters from speakers.json ──────────
-    prune_speakers_json(novel_dir, current_md, result)
+    # ── Sync dormant/reactivated/pruned characters in speakers.json ──────────
+    sync_speakers_json(novel_dir, current_md, result)
 
     print(f"\n  ✓ novel.md updated through chapter {ch_nums[-1]}")
     print(f"  Backup saved in {os.path.join(novel_dir, 'data', 'novel_backups')}/")
