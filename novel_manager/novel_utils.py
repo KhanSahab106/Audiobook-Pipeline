@@ -14,6 +14,8 @@ Functions:
     get_last_updated_chapter(novel_dir) — Parse last_updated_chapter from novel.md meta.
     write_novel_md(novel_dir, content, backup) — Write novel.md with optional backup.
     update_meta_field(content, field, value) — Update a field in the Meta section.
+    extract_character_keys(content)       — Return set of all character keys in the Characters section.
+    parse_chapter_range(arg)              — Parse "101-200" / "101-" / "101" into (start, end).
     extract_character_last_updated(content) — Return {key: last_updated_chapter} for all characters.
 """
 
@@ -240,6 +242,23 @@ def extract_reactivated(old_md: str, new_md: str) -> set[str]:
     old_dormant = extract_dormant_characters(old_md)
     new_dormant = extract_dormant_characters(new_md)
     return old_dormant - new_dormant
+
+
+def parse_chapter_range(arg: str) -> tuple[int, int | None]:
+    """
+    Parse a chapter range argument into (start, end).
+
+    Accepts:
+        "101"    → (101, 101)
+        "101-200" → (101, 200)
+        "101-"   → (101, None)   # all from 101 onwards
+    """
+    if "-" in arg:
+        parts = arg.split("-", 1)
+        start = int(parts[0]) if parts[0] else 1
+        end   = int(parts[1]) if parts[1] else None
+        return start, end
+    return int(arg), int(arg)
 
 
 def extract_character_last_updated(novel_md_content: str) -> dict[str, int]:

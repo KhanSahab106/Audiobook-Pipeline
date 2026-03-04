@@ -7,7 +7,6 @@ and feeds only those to Gemini along with the current novel.md.
 
 Functions:
     build_prompt(current_novel_md, chapters_text, ch_start, ch_end) — Build the update prompt.
-    parse_chapter_range(arg)          — Parse chapter range argument.
     sync_speakers_json(novel_dir, old_md, new_md) — Sync dormant/reactivated/pruned voices.
     prune_speakers_json(novel_dir, old_md, new_md) — Backward-compatible alias for sync_speakers_json.
     main()                            — CLI entry point.
@@ -31,7 +30,7 @@ from novel_manager.novel_utils   import (
     read_novel_md, write_novel_md, update_meta_field,
     get_last_updated_chapter, get_all_chapters,
     extract_character_keys, extract_newly_dormant,
-    extract_reactivated
+    extract_reactivated, parse_chapter_range
 )
 
 
@@ -169,15 +168,6 @@ NEW CHAPTERS ({ch_start}–{ch_end}):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {chapters_text}
 """
-
-
-def parse_chapter_range(arg: str) -> tuple[int, int | None]:
-    if "-" in arg:
-        parts = arg.split("-", 1)
-        start = int(parts[0]) if parts[0] else 1
-        end   = int(parts[1]) if parts[1] else None
-        return start, end
-    return int(arg), int(arg)
 
 
 def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
