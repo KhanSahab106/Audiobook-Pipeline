@@ -151,6 +151,9 @@ def extract_characters_from_novel_md(novel_md: str) -> dict[str, dict]:
                 fields[field_name] = field_value
 
         if fields:
+            # Skip dormant characters — their voices are managed by the dormancy system
+            if fields.get("status", "").lower() == "dormant":
+                continue
             fields["key"] = key
             characters[key] = fields
 
