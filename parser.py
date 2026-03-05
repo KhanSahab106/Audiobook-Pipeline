@@ -160,6 +160,28 @@ you MUST create SEPARATE segments for EACH part. Example:
           the pressure."
 
 NEVER drop the narration around dialogue. Every sentence must appear.
+
+GROUP / SIMULTANEOUS DIALOGUE (CRITICAL):
+When multiple characters speak the SAME line together (indicated by "said together",
+"in unison", "chorused", "exclaimed together", or similar group attribution), produce
+ONLY ONE dialogue segment using the FIRST named character as speaker. The attribution
+line becomes a SEPARATE narration segment with speaker: narrator.
+
+  Example input:  "We must leave now!" — Nemo, Eulalia and Milica said together.
+  Correct output: segment 1 → speaker: nemo, type: dialogue, text: "We must leave now!"
+                  segment 2 → speaker: narrator, type: narration, text: "— Nemo, Eulalia and Milica said together."
+
+  WRONG: Creating separate dialogue segments with the same text for each speaker — NEVER do this.
+
+NARRATION vs DIALOGUE (CRITICAL):
+Any sentence WITHOUT quoted text (inside "" marks) is ALWAYS type: narration with
+speaker: narrator — even if it starts with or mentions a character's name.
+Only type: dialogue and type: thought may have a non-narrator speaker.
+
+  Example input:  Eulalia joined the conversation, sharing the information she had recently received.
+  Correct output: segment 1 → speaker: narrator, type: narration, text: "Eulalia joined the conversation, sharing the information she had recently received."
+
+  WRONG: speaker: eulalia, type: narration ← NEVER assign a character as speaker for narration or action segments.
 """
 
 
@@ -178,6 +200,7 @@ def parse_chapter(text: str, known_characters: list[str]) -> list[dict]:
     raw    = _call_groq(client, _build_message(text, character_list), label="pass-1")
 
     segments = _extract_and_validate(raw, index_offset=0)
+    segments = _dedup_consecutive_dialogue(segments)
 
     # ── Coverage check ───────────────────────────────────────────────────
     coverage = _measure_coverage(text, segments)
@@ -208,6 +231,7 @@ def parse_chapter(text: str, known_characters: list[str]) -> list[dict]:
                 repair_raw,
                 index_offset=len(segments)
             )
+            repair_segs = _dedup_consecutive_dialogue(repair_segs)
 
             segments = _merge_repair(segments, repair_segs, text)
 
@@ -806,6 +830,11 @@ def _validate_segments(segments: list, index_offset: int = 0) -> list:
         if seg["type"] not in VALID_TYPES:
             seg["type"] = "narration"
 
+        # Narration and action segments must always be spoken by the narrator.
+        # Only dialogue and thought may have a character as speaker.
+        if seg["type"] in ("narration", "action") and seg["speaker"] != "narrator":
+            seg["speaker"] = "narrator"
+
         if not seg["text"].strip():
             continue
 
@@ -819,6 +848,45 @@ def _normalize_probe(text: str) -> str:
     """Return first ~40 chars, lowercased and punctuation-stripped, as a paragraph fingerprint."""
     cleaned = re.sub(r"[^\w\s]", "", text.lower()).strip()
     return cleaned[:40]
+
+
+def _word_overlap(text_a: str, text_b: str) -> float:
+    """Return what fraction of the shorter text's words appear in the other.
+
+    Uses the size of the smaller word-set as the denominator so that a line
+    that is literally repeated (possibly with trivial additions) scores near
+    1.0, making it suitable for detecting near-duplicate group-dialogue lines.
+    """
+    words_a = set(re.sub(r"[^\w\s]", "", text_a.lower()).split())
+    words_b = set(re.sub(r"[^\w\s]", "", text_b.lower()).split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / min(len(words_a), len(words_b))
+
+
+def _dedup_consecutive_dialogue(segments: list[dict]) -> list[dict]:
+    """
+    Collapse runs of consecutive dialogue segments that have identical or
+    near-identical text (≥95 % word overlap) into a single segment, keeping
+    the first speaker.  This eliminates duplicated audio caused by the LLM
+    emitting one dialogue segment per speaker when a group speaks in unison.
+    """
+    if not segments:
+        return segments
+
+    result: list[dict] = []
+    for seg in segments:
+        if (
+            seg.get("type") == "dialogue"
+            and result
+            and result[-1].get("type") == "dialogue"
+            and _word_overlap(result[-1]["text"], seg["text"]) >= 0.95
+        ):
+            # Skip — this is a near-duplicate of the previous dialogue segment.
+            continue
+        result.append(seg)
+
+    return result
 
 
 def _merge_short_segments(segments: list[dict], source_text: str) -> list[dict]:

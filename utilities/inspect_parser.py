@@ -112,6 +112,28 @@ you MUST create SEPARATE segments for EACH part. Example:
           the pressure."
 
 NEVER drop the narration around dialogue. Every sentence must appear.
+
+GROUP / SIMULTANEOUS DIALOGUE (CRITICAL):
+When multiple characters speak the SAME line together (indicated by "said together",
+"in unison", "chorused", "exclaimed together", or similar group attribution), produce
+ONLY ONE dialogue segment using the FIRST named character as speaker. The attribution
+line becomes a SEPARATE narration segment with speaker: narrator.
+
+  Example input:  "We must leave now!" — Nemo, Eulalia and Milica said together.
+  Correct output: segment 1 → speaker: nemo, type: dialogue, text: "We must leave now!"
+                  segment 2 → speaker: narrator, type: narration, text: "— Nemo, Eulalia and Milica said together."
+
+  WRONG: Creating separate dialogue segments with the same text for each speaker — NEVER do this.
+
+NARRATION vs DIALOGUE (CRITICAL):
+Any sentence WITHOUT quoted text (inside "" marks) is ALWAYS type: narration with
+speaker: narrator — even if it starts with or mentions a character's name.
+Only type: dialogue and type: thought may have a non-narrator speaker.
+
+  Example input:  Eulalia joined the conversation, sharing the information she had recently received.
+  Correct output: segment 1 → speaker: narrator, type: narration, text: "Eulalia joined the conversation, sharing the information she had recently received."
+
+  WRONG: speaker: eulalia, type: narration ← NEVER assign a character as speaker for narration or action segments.
 """
 
 _API_KEYS = [
