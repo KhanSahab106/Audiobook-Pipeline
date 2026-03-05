@@ -29,8 +29,8 @@ from novel_manager.novel_utils   import (
     get_chapters_in_range, load_chapters_text,
     read_novel_md, write_novel_md, update_meta_field,
     get_last_updated_chapter, get_all_chapters,
-    extract_character_keys, extract_newly_dormant,
-    extract_reactivated, parse_chapter_range
+    extract_character_keys, extract_dormant_characters,
+    extract_newly_dormant, extract_reactivated, parse_chapter_range
 )
 
 
@@ -190,9 +190,22 @@ def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
     characters     = registry.get("characters", {})
     dormant_voices = registry.setdefault("dormant_voices", {})
 
+    # ── 0. Catch-up: characters already dormant but still in characters ──────
+    all_dormant_in_new = extract_dormant_characters(new_md) - {"narrator", "system"}
+    freed = []
+    for key in all_dormant_in_new:
+        if key in characters and key not in dormant_voices:
+            entry = characters[key]
+            dormant_voices[key] = {
+                "xtts_speaker":          entry.get("xtts_speaker", "?"),
+                "gender":                entry.get("gender", "unknown"),
+                "dormant_since_chapter": entry.get("last_updated_chapter"),
+            }
+            del characters[key]
+            freed.append((key, dormant_voices[key]["xtts_speaker"]))
+
     # ── 1. Newly dormant ────────────────────────────────────────────────────
     newly_dormant = extract_newly_dormant(old_md, new_md) - {"narrator", "system"}
-    freed = []
     for key in newly_dormant:
         if key in characters:
             entry = characters[key]
