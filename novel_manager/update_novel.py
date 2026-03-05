@@ -7,8 +7,8 @@ and feeds only those to Gemini along with the current novel.md.
 
 Functions:
     build_prompt(current_novel_md, chapters_text, ch_start, ch_end) — Build the update prompt.
-    sync_speakers_json(novel_dir, old_md, new_md) — Sync dormant/reactivated/pruned voices.
-    prune_speakers_json(novel_dir, old_md, new_md) — Backward-compatible alias for sync_speakers_json.
+    sync_speakers_json(novel_dir, old_md, new_md[, ch_start, ch_end]) — Sync dormant/reactivated/pruned voices.
+    prune_speakers_json(novel_dir, old_md, new_md[, ch_start, ch_end]) — Backward-compatible alias for sync_speakers_json.
     main()                            — CLI entry point.
 
 Usage:
@@ -30,7 +30,8 @@ from novel_manager.novel_utils   import (
     read_novel_md, write_novel_md, update_meta_field,
     get_last_updated_chapter, get_all_chapters,
     extract_character_keys, extract_dormant_characters,
-    extract_newly_dormant, extract_reactivated, parse_chapter_range
+    extract_newly_dormant, extract_reactivated, parse_chapter_range,
+    _parse_character_entries
 )
 
 
@@ -105,11 +106,19 @@ Rules:
       Ch N: marked dormant (no dialogue since Ch X)
   - When reactivating, append to arc_notes:
       Ch N: reactivated
-  - Characters dormant for 2× their tier threshold (truly gone) may be moved
-    to a ## Pruned Characters section at the bottom:
+  - PRUNING (moving to ## Pruned Characters) is a LAST RESORT:
+    A character may ONLY be pruned if ALL of these conditions are met:
+      1. They are ALREADY status: dormant (never prune an active character)
+      2. They have been silent for at least 2× their tier threshold
+      3. They are clearly finished with the story (no ongoing plotlines)
+    Format in ## Pruned Characters:
       - character_key_name
-    Only use this for characters clearly finished with the story.
-  - If no characters are pruned, omit ## Pruned Characters entirely.
+    If no characters qualify, omit ## Pruned Characters entirely.
+  - NEVER prune a character who has dialogue in the current chapter batch
+  - NEVER prune a character whose last_updated_chapter falls within the
+    current batch range — they are clearly still active
+  - NEVER remove a ### entry from ## Characters unless moving to Pruned
+  - When in doubt, keep the character as dormant — do NOT prune
 
 ━━━ WHAT NOT TO DO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -123,6 +132,9 @@ Rules:
   ✗ Do not invent information not in the text
   ✗ Do not mark dormant characters introduced in the current batch
   ✗ Do not mark narrator or system as dormant
+  ✗ Do not prune characters who have dialogue in the current batch
+  ✗ Do not prune characters who are still status: active
+  ✗ Do not remove ### entries from ## Characters without moving to ## Pruned Characters
 
 ━━━ OUTPUT FORMAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -170,7 +182,7 @@ NEW CHAPTERS ({ch_start}–{ch_end}):
 """
 
 
-def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
+def sync_speakers_json(novel_dir: str, old_md: str, new_md: str, ch_start: int = None, ch_end: int = None):
     """
     Sync speakers.json after a novel.md update.
 
@@ -238,11 +250,40 @@ def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
         else:
             needs_cast.append(key)
 
-    # ── 3. Fully pruned ─────────────────────────────────────────────────────
+    # ── 3. Fully pruned — with safety validation ────────────────────────────
     old_keys = extract_character_keys(old_md)
     new_keys = extract_character_keys(new_md)
-    pruned   = old_keys - new_keys - {"narrator", "system"}
-    removed  = []
+    candidate_pruned = old_keys - new_keys - {"narrator", "system"}
+
+    # Cross-check: reject pruning for characters that shouldn't have been pruned
+    old_entries = _parse_character_entries(old_md)
+    rejected = []
+    pruned = set()
+
+    for key in candidate_pruned:
+        old_entry = old_entries.get(key, {})
+        old_status = old_entry.get("status", "active")
+        old_luc = old_entry.get("last_updated_chapter")
+
+        # Safety: reject if character was active (not dormant) in old novel.md
+        if old_status == "active":
+            rejected.append((key, f"was status: active in previous novel.md"))
+            continue
+
+        # Safety: reject if character had dialogue in the current batch
+        in_batch = (
+            old_luc is not None
+            and ch_start is not None
+            and old_luc >= ch_start
+            and (ch_end is None or old_luc <= ch_end)
+        )
+        if in_batch:
+            rejected.append((key, f"last_updated_chapter {old_luc} is within current batch ({ch_start}–{ch_end})"))
+            continue
+
+        pruned.add(key)
+
+    removed = []
     for key in pruned:
         if key in characters:
             del characters[key]
@@ -286,10 +327,19 @@ def sync_speakers_json(novel_dir: str, old_md: str, new_md: str):
             print(f"      {key}")
         print(f"  {'─' * 50}")
 
+    if rejected:
+        print(f"\n  {'─' * 50}")
+        print(f"  ⚠ Rejected {len(rejected)} invalid prune(s) by Gemini:")
+        for key, reason in sorted(rejected):
+            print(f"      {key:30s} — {reason}")
+        print(f"    These characters were kept in speakers.json.")
+        print(f"    Review novel.md — Gemini may have incorrectly removed their entries.")
+        print(f"  {'─' * 50}")
 
-def prune_speakers_json(novel_dir: str, old_md: str, new_md: str):
+
+def prune_speakers_json(novel_dir: str, old_md: str, new_md: str, ch_start: int = None, ch_end: int = None):
     """Backward-compatible wrapper — delegates to sync_speakers_json."""
-    sync_speakers_json(novel_dir, old_md, new_md)
+    sync_speakers_json(novel_dir, old_md, new_md, ch_start=ch_start, ch_end=ch_end)
 
 
 def main():
@@ -354,7 +404,7 @@ def main():
     write_novel_md(novel_dir, result)
 
     # ── Sync dormant/reactivated/pruned characters in speakers.json ──────────
-    sync_speakers_json(novel_dir, current_md, result)
+    sync_speakers_json(novel_dir, current_md, result, ch_start=ch_nums[0], ch_end=ch_nums[-1])
 
     print(f"\n  ✓ novel.md updated through chapter {ch_nums[-1]}")
     print(f"  Backup saved in {os.path.join(novel_dir, 'data', 'novel_backups')}/")
