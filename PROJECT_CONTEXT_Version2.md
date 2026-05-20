@@ -1,13 +1,13 @@
 # PROJECT CONTEXT — AI Audiobook Generation Pipeline
 
-> **Last updated**: 2026-03-03
+> **Last updated**: 2026-03-23
 > **Purpose**: Paste this file at the start of ANY new AI chat session to restore full project context.
 
 ---
 
 ## 1. What This Project Does
 
-Production-grade AI audiobook pipeline that converts web novel `.txt` chapter files into multi-character, multi-emotion WAV/MP3 audio files. Runs unattended on Windows with GPU acceleration. Supports batch processing of 150+ chapters/day.
+Production-grade AI audiobook pipeline that converts web novel `.txt` chapter files into multi-character, multi-emotion WAV/MP3 audio files. Multi-speaker rendering with 56+ trained voices, overflow system for unlimited character support. Runs unattended on Windows with GPU acceleration. Supports batch processing of 150+ chapters/day.
 
 **End-to-end flow:**
 1. Scrape chapters from web → `input/chapter_N.txt`
@@ -26,7 +26,7 @@ Production-grade AI audiobook pipeline that converts web novel `.txt` chapter fi
 |-----------|-----------|
 | TTS Engine | Coqui XTTS v2 (TTS==0.22.0), loaded via `XttsConfig` + `Xtts` classes directly |
 | GPU | RTX 4050 Laptop, CUDA 12.1, ~212s per chapter |
-| LLM Parser | Groq API, `llama-3.3-70b-versatile`, 6 API keys round-robin |
+| LLM Parser | Groq API, `llama-3.3-70b-versatile`, 6 API keys round-robin + OpenRouter fallback |
 | Novel Manager | Gemini 2.5 Flash (`google-genai` SDK) with Google Search grounding |
 | Web Scraper | `curl_cffi` (TLS impersonation) + `cloudscraper` fallback + `requests` fallback |
 | Audio | pydub, soundfile, scipy, numpy, librosa |
@@ -51,12 +51,13 @@ GROQ_API_KEY_3=gsk_...
 GROQ_API_KEY_4=gsk_...
 GROQ_API_KEY_5=gsk_...
 GROQ_API_KEY_6=gsk_...
+OPENROUTER_API_KEY=sk-or-...   # fallback when all Groq keys rate-limited
 GEMINI_API_KEY=AIza...
 ```
 
 ### requirements.txt:
 ```
-librosa, soundfile, scipy, pydub, numpy, torch, TTS, groq,
+librosa, soundfile, scipy, pydub, numpy, torch, TTS, groq, openai,
 python-dotenv, google-genai, curl_cffi, cloudscraper
 ```
 
@@ -74,16 +75,16 @@ audiobook_pipeline/
 ├── .env
 ├── .gitignore
 ├── requirements.txt
-├── voices.md                     # Profiles for all 29 castable XTTS voices
+├── voices.md                     # Profiles for all 56+ castable XTTS voices (built-in + custom trained)
 │
 ├── ── CORE PIPELINE ──────────────────────────────────────────────────
-├── main.py                       # Chapter orchestration, fallback render loop
+├── main.py                       # Chapter orchestration, multi-speaker render loop
 ├── batch.py                      # Checkpoint-aware batch runner + chapter combiner
-├── parser.py                     # Groq LLM parser, JSON repair, coverage verify+repair
-├── registry.py                   # Speaker→voice resolution, gender-aware, Gemini cast aware
-├── renderer.py                   # XTTS v2 inference, tone profiles, 200-char auto-split
+├── parser.py                     # Groq LLM parser, JSON repair, OpenRouter fallback
+├── registry.py                   # Speaker→voice resolution stub
+├── renderer.py                   # XTTS v2 inference, tone profiles, speed_variant support
 ├── assembler.py                  # Audio concat with pause rules
-├── fallback.py                   # 5-stage fallback render engine
+├── fallback.py                   # 4-stage fallback render engine with speed_variant pass-through
 │
 ├── ── NOVEL MANAGER ──────────────────────────────────────────────────
 ├── novel_manager/
@@ -91,17 +92,19 @@ audiobook_pipeline/
 │   ├── gemini_client.py          # Gemini wrapper: call_gemini() + call_gemini_with_search()
 │   ├── novel_utils.py            # Chapter reading, novel.md I/O, dormancy extraction
 │   ├── init_novel.py             # Populate novel.md (text default, --mode web opt-in)
-│   ├── update_novel.py           # Arc update every 50-100 chapters (dormancy WIP)
+│   ├── update_novel.py           # Patch-based arc update (Gemini outputs changes, Python applies)
 │   ├── add_character.py          # Add single new character to novel.md
-│   └── cast_voices.py            # Gemini personality-based voice casting → speakers.json
+│   ├── cast_voices.py            # Gemini voice casting + overflow (speed-variant reuse)
+│   └── audit_characters.py       # Detect & remove ghost/battle-group characters
 │
 ├── ── UTILITIES ──────────────────────────────────────────────────────
 ├── setup_novel.py                # Scaffold new novel directory + novel.md template
-├── scrape_chapter.py             # Stealth web scraper with batch support
-├── train_voice.py                # Custom voice training → injects into speakers_xtts.pth
-├── diagnose_coverage.py          # Parser word coverage checker
-├── inspect_parser.py             # Full Groq response debugger
-├── Speakers.py                   # Prints all XTTS v2 speaker names
+├── utilities/
+│   ├── scrape_chapter.py         # Stealth web scraper with batch support
+│   ├── train_voice.py            # Custom voice training → injects into speakers_xtts.pth
+│   ├── diagnose_coverage.py      # Parser word coverage checker
+│   ├── inspect_parser.py         # Full Groq response debugger
+│   └── Speakers.py               # Prints all XTTS v2 speaker names
 │
 └── novels/
     └── {novel_slug}/
@@ -109,7 +112,7 @@ audiobook_pipeline/
         ├── input/chapter_N.txt
         ├── output/chapter_N.wav
         └── data/
-            ├── speakers.json     # Voice assignments (cast_by: gemini or sequential)
+            ├── speakers.json     # Voice assignments (cast_by: gemini/overflow/sequential)
             ├── checkpoint.json
             ├── failures.log
             ├── chapter_N_failures.json
@@ -123,23 +126,29 @@ audiobook_pipeline/
 **Loading method:** `XttsConfig` + `Xtts.init_from_config` + `load_checkpoint(eval=True)`
 **Speaker access:** `model.speaker_manager.speakers[name]["gpt_cond_latent"]` and `["speaker_embedding"]`
 
-### Voice Pool (29 castable + 2 fixed):
+### Voice Pool (56+ castable + 3 fixed):
 
 **Fixed (never assigned to characters):**
 - `Ana Florence` → narrator always
 - `Nova Hogarth` → system always
+- `Narelle Moon` → unknown/uncast speakers
 
-**Female (19 castable):** Gracie Wise, Sofia Hellen, Tanja Adelina, Barbora MacLean, Szofi Granger, Claribel Dervla, Daisy Studious, Tammie Ema, Alison Dietlinde, Annmarie Nele, Brenda Stern, Gitta Nikolina, Tammy Grit, Chandra MacFarland, Camilla Holmström, Lilya Stainthorpe, Zofija Kendrick, Narelle Moon, Rosemary Okafor
+**Built-in voices:** 29 XTTS v2 speakers (19 female, 10 male)
+**Custom trained voices:** 27+ (female-1 through female-20, male-1 through male-7+)
 
-**Male (10 castable):** Damien Black, Craig Gutsy, Torcull Diarmuid, Ludvig Milivoj, Baldur Sanjin, Zacharie Aimilios, Andrew Chipper, Dionisio Schuyler, Abrahan Mack, Viktor Menelaos
+All voices catalogued in `voices.md` with gender, age, accent, tone, best-use.
+`cast_voices.py` reads `voices.md` dynamically — any voice added via `train_voice.py` is auto-recognised.
 
 ### Tone Profiles (speed locked to 1.1 globally, pitch disabled):
 
 **CRITICAL FINDING:** Speed variation was causing voice identity bleed across tones. Speed is now **locked to 1.1 for ALL 16 tone profiles**. Emotional variation is achieved solely through `temperature` (0.3–0.85), `repetition_penalty`, and `top_p`. `length_penalty` hard-locked to 1.0.
 
+**However**, the overflow system deliberately uses speed variation (`speed_variant`) as a feature — when applied per-character (not per-tone), it creates distinct voice identities from the same base voice. Speed variant multiplies with tone speed: `final_speed = tone_speed * speed_variant`.
+
 16 valid tones: neutral, calm, tense, whisper, angry, sad, excited, cold, + 8 more expanded tones.
 
 ### Renderer behavior:
+- **Multi-speaker**: loads `speakers.json`, resolves each segment's speaker to XTTS voice + optional speed_variant
 - 200-char limit: auto-splits long segments at sentence boundaries, rejoins with 80ms gap
 - `gpt_cond_latent` and `speaker_embedding` held 100% constant across all segments for voice consistency
 
@@ -149,9 +158,10 @@ audiobook_pipeline/
 
 - Model: `llama-3.3-70b-versatile` (staying on this — evaluated llama-4-scout, rejected due to TPM limits and JSON accuracy concerns)
 - 6 API keys: dynamic round-robin from `.env`
+- **OpenRouter fallback**: when all 6 Groq keys are rate-limited, auto-falls back to `meta-llama/llama-3.3-70b-instruct` via OpenRouter API (no TPM limit, slower). Includes continuation loop for truncated responses.
 - `max_tokens`: 8192
-- On rate limit: smart per-key tracking, exponential backoff with parsed `retry-after` times (e.g., `12.5s`, `1m30s`)
-- On transient errors (502/503/timeout): incremental `time.sleep()` with exponential fallback instead of crash
+- On rate limit: smart per-key tracking, exponential backoff with parsed `retry-after` times
+- On transient errors (502/503/timeout): incremental `time.sleep()` with exponential fallback
 - On truncation (`finish_reason == "length"`): continuation call via `_continue_truncated()`
 - Token tracking per chapter: input, output, total, calls
 
@@ -165,18 +175,19 @@ JSON array of segments: `{index, speaker, type, tone, text}`
 
 ### JSON Repair (3-stage recovery):
 1. Direct `json.loads()` parse
-2. `_repair_json()`: fixes unescaped quotes, trailing commas, unclosed arrays
-3. `_extract_partial_segments()`: regex extracts individual `{..}` objects independently
+2. `_repair_json()`: fixes unescaped quotes, trailing commas, unclosed arrays, missing index values
+3. `_extract_partial_segments()`: per-segment schema-aware extraction via `_fix_segment_object()` — extracts each field individually so unescaped quotes in text don't poison other segments
 
 ---
 
-## 7. Fallback Engine (5 stages in fallback.py)
+## 7. Fallback Engine (4 stages in fallback.py)
 
-1. Normal render × 3 retries
-2. Cleaned text (strip non-ASCII) × 3 retries
-3. Fallback speaker Ana Florence × 3 retries
-4. Split into 150-char parts, render individually
-5. Audible placeholder (440Hz tone) + log to `data/{chapter}_failures.json`
+All stages pass `speed_variant` through to maintain character voice identity.
+
+1. Normal render × 3 retries (with character's voice + speed_variant)
+2. Cleaned text (strip non-ASCII, interjection normalization, trailing punctuation removal) × 3 retries
+3. Split into 150-char parts, render individually
+4. Audible placeholder (440Hz tone) + log to `data/{chapter}_failures.json`
 
 ---
 
@@ -222,10 +233,13 @@ Usage: `python scrape_chapter.py shs_and_sws <URL> -n 12`
 - Web mode (`--mode web`): Gemini searches internet, auto-fallback to text if <60% coverage
 - Usage: `python novel_manager/init_novel.py novels/slug --chapters 1-10`
 
-### update_novel.py
+### update_novel.py (PATCH-BASED ARCHITECTURE)
 - Arc update — auto-detects new chapters since `last_updated_chapter`
-- Appends to `arc_notes`, never overwrites, upgrades confidence levels
-- **WIP: Smart Voice Slot Dormancy** (see Known Issues)
+- **Gemini outputs ONLY changes** (structured patch block), Python applies them surgically
+- Characters can NEVER be silently dropped — Gemini never writes the full character list
+- Patch commands: `UPDATE_CHARACTER`, `NEW_CHARACTER`, `MARK_DORMANT`, `REACTIVATE`, `PRUNE`, `UPDATE_SECTION`, `APPEND_CHAPTER_MAP`
+- Smart Voice Slot Dormancy: importance-tiered thresholds (Protagonist=NEVER, S-Tier=200ch, A-Tier=150ch, B-Tier=100ch, C-Tier=50ch)
+- `sync_speakers_json()`: frees voice slots for dormant characters, restores reactivated ones
 
 ### add_character.py
 - Targeted single character entry with preview + confirmation
@@ -235,14 +249,28 @@ Usage: `python scrape_chapter.py shs_and_sws <URL> -n 12`
 - Gemini reads character profiles from `novel.md` + voice profiles from `voices.md`
 - Returns personality-matched voice assignments
 - Validates: correct names, no reserved voices, no duplicates, gender mismatch warnings
+- **Overflow system**: when all unique voices are used up, reuses voices with speed modifiers
+  - 6 speed offsets: `[0.85, 1.15, 0.88, 1.12, 0.92, 1.08]` per base voice
+  - Never reuses protagonist/deuteragonist voices
+  - Gender-matched when possible
+  - **56 base voices × 6 variants = 336 effective voice slots**
 - Usage: `python novel_manager/cast_voices.py novels/slug [--dry-run] [--recast-all] [--character name]`
 
-### train_voice.py (NEW)
+### audit_characters.py
+- Detects problematic character entries that waste voice slots:
+  - **Battle-group NPCs**: numbered/generic enemies detected by name pattern
+  - **Ghost characters**: no dialogue evidence in arc_notes
+  - **Suspicious LUC**: fabricated last_updated_chapter values
+- Bulk removal with backup: `python novel_manager/audit_characters.py novels/slug --remove all`
+
+### train_voice.py
 - Custom voice training from `.wav`/`.mp3` clips
+- Silence trimming + clip filtering (min 1.5s after trim, max 50 clips)
 - Calculates embeddings (latent conditioning + speaker values)
 - Injects directly into `speakers_xtts.pth`
-- Auto-appends entries to `voices.md`
+- Auto-appends entries to `voices.md` (regex-based, section-aware)
 - Generates test audio in `voice_tests/`
+- **Auto-reject**: if test voice > 12s, removes from model + voices.md + test file
 
 ---
 
@@ -254,17 +282,20 @@ Usage: `python scrape_chapter.py shs_and_sws <URL> -n 12`
   "characters": {
     "narrator":  { "xtts_speaker": "Ana Florence" },
     "system":    { "xtts_speaker": "Nova Hogarth" },
+    "unknown":   { "xtts_speaker": "Narelle Moon" },
     "idan":      { "xtts_speaker": "Damien Black", "gender": "male", "cast_by": "gemini" },
-    "arabel":    { "xtts_speaker": "Gracie Wise", "gender": "female", "cast_by": "gemini" }
+    "arabel":    { "xtts_speaker": "Gracie Wise", "gender": "female", "cast_by": "gemini" },
+    "minor_npc": { "xtts_speaker": "Craig Gutsy", "gender": "male", "cast_by": "overflow",
+                   "is_overflow": true, "speed_variant": 0.85 }
   },
-  "female_pool_index": 1,
-  "male_pool_index": 0
+  "dormant_voices": {}
 }
 ```
 
 - `cast_by: "gemini"` = optimally cast, don't reassign
-- `cast_by: "sequential"` or missing = fallback assignment, should run `cast_voices.py`
-- Gender-aware pools: separate `FEMALE_POOL` and `MALE_POOL` with independent indices
+- `cast_by: "overflow"` = reused voice with speed modifier (auto-assigned when pool exhausted)
+- `is_overflow: true` + `speed_variant: 0.85` = renderer applies speed multiplier on tone speed
+- `dormant_voices` = voice slots freed by dormant characters, restored on reactivation
 
 ---
 
@@ -279,24 +310,24 @@ Usage: `python scrape_chapter.py shs_and_sws <URL> -n 12`
 
 ## 13. Known Issues & WIP
 
-### ✅ Resolved
+### Resolved
 | Issue | Resolution |
 |-------|-----------|
 | Voice identity bleed across tones | Speed locked to 1.1 globally, emotion via temperature/top_p only |
-| Parser JSON failures from unescaped quotes | `_repair_json()` + 3-stage recovery + system prompt instruction |
+| Parser JSON failures from unescaped quotes | 3-stage recovery + per-segment schema extraction (`_fix_segment_object`) |
 | `google.generativeai` deprecated | Migrated to `google-genai` SDK |
 | XTTS pitch_shift broken (librosa ufunc) | Pitch set to 0 in all profiles |
-| Camilla Holmström UTF-8 encoding crash | Sanitized in speakers.json |
+| Camilla Holmstrom UTF-8 encoding crash | ASCII-folded in voices.md + `ensure_ascii=True` in JSON writes |
 | Windows background terminal GPU throttling | `ctypes` OS priority boost in batch.py |
 | Male characters getting female voices | Gender-aware pool assignment |
 | Voice slot waste on unnamed speakers | Parser assigns unknown speakers to `narrator` |
-| Unicode crash in Windows CMD | ASCII-safe console output in scraper |
-
-### 🔧 Work In Progress
-| Issue | Status |
-|-------|--------|
-| **Smart Voice Slot Dormancy** | Designed but NOT fully wired. `novel_utils.py` has `extract_dormant_characters()`. `update_novel.py` system prompt and `prune_speakers_json()` are **incomplete**. Importance-tiered: Protagonist=NEVER, S-Tier=200ch, B/C/D=100/30ch dormancy delays. |
-| Together AI migration | Evaluated as Groq alternative (identical model, expanded limits). Not implemented yet. |
+| Groq rate limit causing crashes | OpenRouter fallback (`meta-llama/llama-3.3-70b-instruct`) auto-activates |
+| Gemini silently dropping characters | Patch-based `update_novel.py` — Gemini outputs changes only, Python applies |
+| Voice pool exhaustion on 50+ characters | Overflow system: speed-variant voice reuse (336 effective slots) |
+| Ghost/NPC characters wasting voice slots | `audit_characters.py` detects and bulk-removes them |
+| Custom voices not recognized by caster | `cast_voices.py` dynamically loads from `voices.md` |
+| XTTS interjection stretching ("Ahh...") | `clean_text_for_tts()` inserts comma after standalone interjections |
+| Trailing punctuation gibberish | `clean_text_for_tts()` strips trailing `?!.` from sentences |
 
 ---
 
@@ -322,14 +353,18 @@ python novel_manager/add_character.py novels/novel_name --character name
 python novel_manager/cast_voices.py novels/novel_name --character name
 
 # ── Scraping ──
-python scrape_chapter.py novel_slug <START_URL> -n 12
+python utilities/scrape_chapter.py novel_slug <START_URL> -n 12
 
 # ── Custom voice training ──
-python train_voice.py <voice_name> <audio_file.wav>
+python utilities/train_voice.py <voice_name> <audio_dir>/
+
+# ── Character audit (find ghost/NPC clutter) ──
+python novel_manager/audit_characters.py novels/novel_name --luc-suspect 350
+python novel_manager/audit_characters.py novels/novel_name --remove battle_group
 
 # ── Debugging ──
-python inspect_parser.py novels/novel_name/input/chapter_N.txt
-python diagnose_coverage.py novels/novel_name/input/chapter_N.txt
+python utilities/inspect_parser.py novels/novel_name/input/chapter_N.txt
+python utilities/diagnose_coverage.py novels/novel_name/input/chapter_N.txt
 python main.py novels/novel_name/input/chapter_1.txt
 ```
 
@@ -340,5 +375,8 @@ python main.py novels/novel_name/input/chapter_1.txt
 > [UPDATE THIS SECTION every time you switch AI sessions]
 
 ```
-[Describe what you need help with next here]
+Multi-speaker rendering and overflow system implemented and tested.
+All characters now use their assigned voices from speakers.json.
+Overflow system auto-assigns speed-variant voices when pool is exhausted.
+Next: run cast_voices.py and test multi-speaker audio output.
 ```

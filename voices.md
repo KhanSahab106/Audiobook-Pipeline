@@ -1,7 +1,7 @@
 # XTTS v2 Voice Pool
 
 Global reference for all available voices in the pipeline.
-31 curated voices — 20 female, 11 male.
+56 curated voices — 31 female, 25 male.
 Used by the voice casting system when assigning characters.
 
 ---
@@ -120,7 +120,7 @@ Used by the voice casting system when assigning characters.
 - Tone: warm, grounded, slightly husky
 - Best for: earthy female characters, healers, nurturing personalities
 
-### Camilla Holmström
+### Camilla Holmstrom
 - Gender: female
 - Age: adult, late 20s
 - Accent: light Scandinavian
@@ -154,6 +154,146 @@ Used by the voice casting system when assigning characters.
 - Accent: neutral with slight African English inflection
 - Tone: warm, dignified, steady
 - Best for: wise or elder female characters, priestesses, healers
+
+### female-1
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-2
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-3
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-4
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-5
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-6
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-7
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-8
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-9
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-10
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-11
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-12
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-13
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-14
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-15
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-16
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-17
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-18
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-19
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### female-20
+- Gender: female
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
 
 ---
 
@@ -229,9 +369,111 @@ Used by the voice casting system when assigning characters.
 - Tone: measured, slightly weary, experienced
 - Best for: seasoned veterans, cynical characters, older advisors
 
-### Nova Hogarth *(see female section)*
 
----
+### male-2
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-3
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-4
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-5
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-6
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-7
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-8
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-9
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-10
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-11
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-12
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-13
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-14
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-15
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
+
+### male-16
+- Gender: male
+- Age: adult, 30s
+- Accent: neutral
+- Tone: clear, natural
+- Best for: general characters
 
 ## Casting guidelines
 
@@ -241,4 +483,4 @@ Used by the voice casting system when assigning characters.
 - **Antagonists**: Ludvig Milivoj (cold/calculating), Craig Gutsy (aggressive/brutal), Viktor Menelaos (weary/cynical)
 - **Authority/mentors**: Dionisio Schuyler, Torcull Diarmuid, Baldur Sanjin, Brenda Stern, Barbora MacLean
 - **Young characters**: Andrew Chipper, Daisy Studious, Szofi Granger, Lilya Stainthorpe
-- **Pool has 30 character slots** (31 minus narrator). More than enough for any web novel.
+- **Pool has 55 character slots** (56 minus narrator). More than enough for any web novel.

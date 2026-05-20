@@ -20,7 +20,6 @@ import os
 import sys
 import json
 from parser    import parse_chapter, get_token_report, reset_token_tracker
-from registry  import load_registry, resolve_speaker, get_known_characters, save_registry
 from renderer  import load_tts, render_segment
 from assembler import assemble
 from fallback  import render_with_fallback
@@ -93,26 +92,20 @@ def process_chapter(chapter_file: str, tts=None, tts_config=None):
     word_count = len(text.split())
     print(f"  Words   : {word_count}\n")
 
-    # ── Load registry ────────────────────────────────────────
-    registry = load_registry(novel_dir)
-    known    = get_known_characters(registry)
-
     # ── [1/3] Parse ──────────────────────────────────────────
     _step("1/3", "Parsing chapter")
     t0 = time.perf_counter()
 
     try:
-        segments = parse_chapter(text, known)
+        segments = parse_chapter(text)
     except Exception as e:
         print(f"  ✗ Parser failed: {e}")
         print(f"  Chapter {chapter_name} skipped.\n")
         return tts, tts_config
 
     parse_time     = time.perf_counter() - t0
-    speakers_found = set(s["speaker"] for s in segments)
 
     print(f"  Segments : {len(segments)}")
-    print(f"  Speakers : {speakers_found}")
     print(f"  Time     : {parse_time:.1f}s\n")
 
     if not segments:
@@ -132,24 +125,50 @@ def process_chapter(chapter_file: str, tts=None, tts_config=None):
     failure_log    = []
     audio_segments = []
 
+    # Load speakers.json for multi-speaker resolution
+    speakers_path = os.path.join(data_dir, "speakers.json")
+    speakers_reg  = {}
+    if os.path.exists(speakers_path):
+        with open(speakers_path, "r", encoding="utf-8") as f:
+            speakers_data = json.load(f)
+        speakers_reg = speakers_data.get("characters", {})
+    else:
+        print("  Note: speakers.json not found -- using narrator for all segments")
+
     for seg in segments:
         if not seg["text"].strip():
             continue
 
-        xtts_speaker = resolve_speaker(seg["speaker"], registry, novel_dir)
+        # Resolve speaker from speakers.json
+        speaker_key = seg.get("speaker", "narrator").lower().strip()
+        entry       = speakers_reg.get(speaker_key, None)
 
+        if entry:
+            xtts_speaker  = entry.get("xtts_speaker", "Ana Florence")
+            speed_variant = entry.get("speed_variant", 1.0)
+        elif speaker_key in ("narrator", "system"):
+            xtts_speaker  = speakers_reg.get(speaker_key, {}).get("xtts_speaker", "Ana Florence")
+            speed_variant = 1.0
+        else:
+            # Unknown speaker -- use 'unknown' voice or fall back to narrator
+            unknown_entry = speakers_reg.get("unknown", {})
+            xtts_speaker  = unknown_entry.get("xtts_speaker", "Ana Florence")
+            speed_variant = 1.0
+
+        overflow_tag = " [overflow]" if entry and entry.get("is_overflow") else ""
         print(
             f"  [{seg['index']:03d}] "
-            f"{seg['speaker']:<15} | "
+            f"{speaker_key:<16}| "
             f"{xtts_speaker:<22} | "
             f"{seg['tone']:<8} | "
-            f"{seg['text'][:55]}"
+            f"{seg['text'][:50]}{overflow_tag}"
         )
 
         wav = render_with_fallback(
             tts, tts_config,
             seg, xtts_speaker,
-            failure_log
+            failure_log,
+            speed_variant=speed_variant,
         )
 
         audio_segments.append({

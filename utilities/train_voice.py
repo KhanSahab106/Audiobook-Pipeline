@@ -29,6 +29,7 @@ import argparse
 import torch
 import numpy as np
 import soundfile as sf
+import librosa
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 
@@ -63,8 +64,8 @@ def collect_audio_files(paths: list[str]) -> list[str]:
     audio_files = []
     for p in paths:
         if os.path.isdir(p):
-            audio_files.extend(glob.glob(os.path.join(p, "*.wav")))
-            audio_files.extend(glob.glob(os.path.join(p, "*.mp3")))
+            audio_files.extend(glob.glob(os.path.join(p, "**", "*.wav"), recursive=True))
+            audio_files.extend(glob.glob(os.path.join(p, "**", "*.mp3"), recursive=True))
         elif os.path.isfile(p):
             audio_files.append(p)
         else:
@@ -72,21 +73,81 @@ def collect_audio_files(paths: list[str]) -> list[str]:
     return sorted(audio_files)
 
 
+def trim_and_filter_clips(
+    audio_files: list[str],
+    min_duration: float = 1.5,
+    max_clips: int = 50,
+    silence_db: float = 30.0,
+) -> list[str]:
+    """
+    Filter out clips that are too short after silence trimming.
+    Also cap total clips at max_clips to avoid embedding averaging noise.
+
+    XTTS performance degrades when averaging too many clips — the averaged
+    embedding becomes a blurry 'mean' voice rather than a crisp identity.
+    50 diverse clips is optimal; 100+ adds diminishing returns and can
+    introduce pause artifacts from clips with leading/trailing silence.
+
+    Args:
+        audio_files:  List of raw audio paths
+        min_duration: Minimum seconds of speech content after trimming
+        max_clips:    Cap on how many clips to actually use
+        silence_db:   dB below peak to treat as silence (higher = more aggressive trim)
+
+    Returns:
+        Filtered, trimmed list (saved as temp .wav files in system temp dir)
+    """
+    import tempfile
+    import shutil
+
+    print(f"\n  Filtering {len(audio_files)} clips (min {min_duration}s, max {max_clips})...")
+
+    good = []
+    skipped = 0
+    tmp_dir = tempfile.mkdtemp(prefix="xtts_train_")
+
+    for path in audio_files:
+        if len(good) >= max_clips:
+            break
+        try:
+            y, sr = librosa.load(path, sr=None, mono=True)
+            # Trim leading/trailing silence
+            y_trim, _ = librosa.effects.trim(y, top_db=silence_db)
+            duration = len(y_trim) / sr
+
+            if duration < min_duration:
+                skipped += 1
+                continue
+
+            # Save trimmed version to temp dir
+            out_path = os.path.join(tmp_dir, f"{len(good):04d}_{os.path.basename(path)}.wav")
+            sf.write(out_path, y_trim, sr)
+            good.append(out_path)
+
+        except Exception as e:
+            print(f"  ⚠ Could not process {os.path.basename(path)}: {e}")
+            skipped += 1
+
+    print(f"  ✓ Using {len(good)} clips  ({skipped} skipped — too short or unreadable)")
+    if skipped > len(audio_files) * 0.5:
+        print(f"  ⚠ More than half your clips were skipped. Consider lowering --min-duration.")
+
+    return good, tmp_dir
+
+
 def compute_speaker_embedding(model, audio_files: list[str]):
     """
     Compute speaker conditioning latents from audio samples.
     Returns (gpt_cond_latent, speaker_embedding) tensors.
     """
-    print(f"\n  Computing speaker embedding from {len(audio_files)} sample(s)...")
-    for f in audio_files:
-        print(f"    📁 {os.path.basename(f)}")
+    print(f"\n  Computing speaker embedding from {len(audio_files)} clip(s)...")
 
     gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
         audio_path=audio_files
     )
 
     print(f"  ✓ Embedding computed")
-    print(f"    gpt_cond_latent shape: {gpt_cond_latent.shape}")
+    print(f"    gpt_cond_latent shape : {gpt_cond_latent.shape}")
     print(f"    speaker_embedding shape: {speaker_embedding.shape}")
 
     return gpt_cond_latent, speaker_embedding
@@ -108,8 +169,8 @@ def save_speakers(model):
     print(f"  ✓ Saved to {SPEAKERS_FILE}")
 
 
-def generate_test(model, voice_name: str):
-    """Generate a test audio clip with the new voice."""
+def generate_test(model, voice_name: str) -> float:
+    """Generate a test audio clip. Returns duration in seconds."""
     os.makedirs(TEST_OUTPUT, exist_ok=True)
     safe_name = voice_name.replace(" ", "_").lower()
     out_path  = os.path.join(TEST_OUTPUT, f"test_{safe_name}.wav")
@@ -141,21 +202,22 @@ def generate_test(model, voice_name: str):
     sf.write(out_path, wav, SAMPLE_RATE)
     duration = len(wav) / SAMPLE_RATE
     print(f"  ✓ Test saved: {out_path} ({duration:.1f}s)")
+    return duration
 
 
 def append_to_voices_md(voice_name: str, gender: str, age: str,
                          accent: str, tone: str, best_for: str):
-    """Append a new voice entry to voices.md."""
-    section = "Female Voices" if gender.lower() == "female" else "Male Voices"
+    """Append a new voice entry to voices.md in the correct section."""
+    import re as _re
 
-    entry = f"""
-### {voice_name}
-- Gender: {gender}
-- Age: {age}
-- Accent: {accent}
-- Tone: {tone}
-- Best for: {best_for}
-"""
+    entry = (
+        f"\n### {voice_name}\n"
+        f"- Gender: {gender}\n"
+        f"- Age: {age}\n"
+        f"- Accent: {accent}\n"
+        f"- Tone: {tone}\n"
+        f"- Best for: {best_for}\n"
+    )
 
     with open(VOICES_MD, "r", encoding="utf-8") as f:
         content = f.read()
@@ -165,23 +227,26 @@ def append_to_voices_md(voice_name: str, gender: str, age: str,
         print(f"  ⚠ '{voice_name}' already exists in voices.md — skipping append")
         return
 
-    # Find the section and append before the --- separator
-    if section == "Male Voices":
-        # Append before the casting guidelines section
-        marker = "---\n\n## Casting guidelines"
+    if gender.lower() == "female":
+        # Insert just before ## Male Voices (with any amount of preceding ---)
+        pattern = _re.compile(r'(?=\n(?:-+\n+)?## Male Voices)', _re.MULTILINE)
+        new_content, n = pattern.subn(entry, content, count=1)
+        section = "Female Voices"
     else:
-        marker = "---\n\n## Male Voices"
+        # Insert just before ## Casting guidelines (with any amount of preceding ---)
+        pattern = _re.compile(r'(?=\n(?:-+\n+)?## Casting guidelines)', _re.MULTILINE)
+        new_content, n = pattern.subn(entry, content, count=1)
+        section = "Male Voices"
 
-    if marker in content:
-        content = content.replace(marker, entry.rstrip() + "\n\n" + marker)
+    if n:
+        with open(VOICES_MD, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"  ✓ Added to voices.md under {section}")
     else:
         # Fallback: append at end
-        content += entry
-
-    with open(VOICES_MD, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    print(f"  ✓ Added to voices.md under {section}")
+        with open(VOICES_MD, "a", encoding="utf-8") as f:
+            f.write(entry)
+        print(f"  ✓ Added to voices.md (appended at end — section marker not found)")
 
 
 def list_voices():
@@ -196,16 +261,51 @@ def list_voices():
 
 
 def remove_voice(voice_name: str):
-    """Remove a voice from speakers_xtts.pth."""
+    """Remove a voice from speakers_xtts.pth, its test file, and voices.md entry."""
+    import re as _re
+
+    # ── 1. Remove from speakers_xtts.pth ─────────────────────
     speakers = torch.load(SPEAKERS_FILE, map_location="cpu")
     if voice_name not in speakers:
-        print(f"  ✗ Voice '{voice_name}' not found")
+        print(f"  ✗ Voice '{voice_name}' not found in speakers file")
         print(f"  Available: {', '.join(sorted(speakers.keys()))}")
         return
     del speakers[voice_name]
     torch.save(speakers, SPEAKERS_FILE)
-    print(f"  ✓ Removed '{voice_name}' from {SPEAKERS_FILE}")
-    print(f"  Remaining voices: {len(speakers)}")
+    print(f"  ✓ Removed from speakers_xtts.pth  ({len(speakers)} voices remain)")
+
+    # ── 2. Delete test audio file ─────────────────────────────
+    safe_name  = voice_name.replace(" ", "_").lower()
+    test_path  = os.path.join(TEST_OUTPUT, f"test_{safe_name}.wav")
+    if os.path.exists(test_path):
+        os.remove(test_path)
+        print(f"  ✓ Deleted test file: {test_path}")
+    else:
+        print(f"  – No test file found at: {test_path}")
+
+    # ── 3. Remove entry from voices.md ───────────────────────
+    if not os.path.exists(VOICES_MD):
+        print(f"  – voices.md not found, skipping")
+        return
+
+    with open(VOICES_MD, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Match the ### heading and everything up to the next ### or ## or EOF
+    pattern = _re.compile(
+        rf'^### {_re.escape(voice_name)}\s*\n.*?(?=^###\s|^##\s|\Z)',
+        flags=_re.MULTILINE | _re.DOTALL
+    )
+    new_content, n = pattern.subn("", content)
+
+    if n:
+        # Clean up any double blank lines left behind
+        new_content = _re.sub(r'\n{3,}', '\n\n', new_content)
+        with open(VOICES_MD, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        print(f"  ✓ Removed entry from voices.md")
+    else:
+        print(f"  – Entry '### {voice_name}' not found in voices.md")
 
 
 def main():
@@ -238,6 +338,15 @@ def main():
                         help="List all registered voices and exit")
     parser.add_argument("--remove", metavar="NAME",
                         help="Remove a voice by name and exit")
+    parser.add_argument("--min-duration", type=float, default=1.5, metavar="SECS",
+                        help="Minimum clip duration after silence trimming (default: 1.5s)")
+    parser.add_argument("--max-clips", type=int, default=50, metavar="N",
+                        help="Max number of clips to use for embedding (default: 50)")
+    parser.add_argument("--silence-db", type=float, default=30.0, metavar="DB",
+                        help="Silence trim aggressiveness in dB (default: 30 — higher trims more)")
+    parser.add_argument("--max-test-duration", type=float, default=12.0, metavar="SECS",
+                        help="Auto-reject voice if test audio exceeds this duration in seconds (default: 12.0). "
+                             "Long test = excessive pauses = bad embedding. Use --max-test-duration 0 to disable.")
 
     args = parser.parse_args()
 
@@ -260,8 +369,8 @@ def main():
         print("✗ Provide at least one audio file or directory")
         sys.exit(1)
 
-    audio_files = collect_audio_files(args.audio_paths)
-    if not audio_files:
+    raw_files = collect_audio_files(args.audio_paths)
+    if not raw_files:
         print("✗ No audio files found in the provided paths")
         sys.exit(1)
 
@@ -270,10 +379,23 @@ def main():
     print(f"\n{'═' * 55}")
     print(f"  XTTS Voice Trainer")
     print(f"{'═' * 55}")
-    print(f"  Voice name : {voice_name}")
-    print(f"  Gender     : {args.gender}")
-    print(f"  Samples    : {len(audio_files)}")
+    print(f"  Voice name   : {voice_name}")
+    print(f"  Gender       : {args.gender}")
+    print(f"  Raw clips    : {len(raw_files)}")
+    print(f"  Min duration : {args.min_duration}s after silence trim")
+    print(f"  Max clips    : {args.max_clips}")
     print(f"{'═' * 55}")
+
+    # Filter and trim clips before loading model (fast CPU step)
+    audio_files, tmp_dir = trim_and_filter_clips(
+        raw_files,
+        min_duration=args.min_duration,
+        max_clips=args.max_clips,
+        silence_db=args.silence_db,
+    )
+    if not audio_files:
+        print("✗ No usable clips after filtering. Lower --min-duration or check your audio.")
+        sys.exit(1)
 
     model, config = load_model()
 
@@ -283,6 +405,7 @@ def main():
         response = input("  Overwrite? (y/N): ").strip().lower()
         if response != "y":
             print("  Aborted.")
+            import shutil; shutil.rmtree(tmp_dir, ignore_errors=True)
             return
 
     gpt_cond_latent, speaker_embedding = compute_speaker_embedding(model, audio_files)
@@ -290,13 +413,34 @@ def main():
     save_speakers(model)
 
     if not args.no_test:
-        generate_test(model, voice_name)
+        test_duration = generate_test(model, voice_name)
+
+        # ── Auto-reject if test is too long (indicates pause artifacts) ──
+        max_dur = args.max_test_duration
+        if max_dur > 0 and test_duration > max_dur:
+            print(f"\n  ✗ REJECTED: test duration {test_duration:.1f}s > {max_dur}s limit")
+            print(f"  Voice has excessive pauses — removing from all locations.")
+
+            # remove_voice() handles: speakers_xtts.pth + test file + voices.md
+            remove_voice(voice_name)
+
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            print(f"  Tip: try fewer clips (--max-clips 20) or longer samples to reduce pauses.")
+            sys.exit(1)
+    else:
+        test_duration = None
 
     if not args.no_voices_md:
         append_to_voices_md(
             voice_name, args.gender, args.age,
             args.accent, args.tone, args.best_for
         )
+
+    # Clean up temp trimmed files
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print(f"\n{'═' * 55}")
     print(f"  ✓ Voice '{voice_name}' is ready!")

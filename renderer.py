@@ -23,6 +23,7 @@ Functions:
 
 import os
 import re
+import unicodedata
 import numpy as np
 import torch
 import scipy.signal as sps
@@ -70,17 +71,51 @@ TONE_PROFILES = {
 
 
 def clean_text_for_tts(text: str) -> str:
-    """Normalize text for natural TTS output (stutters, encoding, punctuation)."""
-    # Remove square brackets — XTTS treats them as special tokens, causing
-    # mispronunciation of the first word (e.g. "[The host..." → "theaah")
+    """Normalize text for natural TTS output (stutters, encoding, punctuation).
+
+    Fixes applied in order:
+    1. Strip square brackets — XTTS treats as special tokens.
+    2. Stutters: 'w-who' → 'who', 'I-I' → 'I'.
+    3. ASCII-fold — XTTS only handles ASCII cleanly.
+    4. Interjection normalization — 'Ah' / 'Oh' alone at sentence start
+       cause XTTS to sing/stretch the vowel; add comma to break the
+       synthesis boundary so it reads as a natural exclamation.
+    5. Trailing punctuation removal — XTTS generates gibberish noise on
+       sentence-final '?', '!', '.' so we strip trailing punctuation and
+       ensure the sentence ends cleanly.
+    6. Collapse repeated punctuation / spaces.
+    """
+    # 1. Square brackets
     text = text.replace("[", "").replace("]", "")
-    # Stutters: "w-who" → "who", "s-stop" → "stop", "th-the" → "the"
+
+    # 2. Stutters
     text = re.sub(r"\b([a-zA-Z]{1,3})-(?=\1)", "", text, flags=re.IGNORECASE)
-    # Repeated word stutters: "I-I" → "I", "no-no" → "no"
     text = re.sub(r"\b(\w+)(?:-\1)+\b", r"\1", text, flags=re.IGNORECASE)
+
+    # 3. ASCII-fold
     text = text.encode("ascii", "ignore").decode("ascii")
+
+    # 4. Interjection normalization — standalone vowel syllables at the start
+    #    of a sentence get stretched horribly by XTTS.
+    #    'Ah, the Saint!' → fine (comma already present)
+    #    'Ah the Saint!'  → 'Ahh...the saint'  ← fix: insert comma after
+    #    'Oh no!' → 'Oh, no!'
+    text = re.sub(
+        r"^(Ah|Oh|Eh|Uh|Mm|Hmm|Hm|Ha|Hah|Whoa|Ooh|Aah|Aww)\s+(?=[A-Z])",
+        r"\1, ",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 5. Trailing punctuation — XTTS generates noise/gibberish at sentence
+    #    endings with '?', '!', and sometimes '.' after short sentences.
+    #    Strip them so the waveform ends cleanly on the last word.
+    text = re.sub(r"[?!.]+$", "", text)
+
+    # 6. Collapse repeated punctuation and spaces
+    text = re.sub(r"([,;:]){2,}", r"\1", text)
     text = re.sub(r" +", " ", text)
-    text = re.sub(r"([.!?,]){3,}", r"\1\1", text)
+
     return text.strip()
 
 
@@ -249,6 +284,60 @@ def _trim_trailing_noise(wav: np.ndarray, text: str, sr: int = SAMPLE_RATE) -> n
     return wav
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  SPEAKER KEY RESOLUTION
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# XTTS stores speaker names in its internal dictionary, but the encoding may
+# not match the UTF-8 strings from speakers.json. For example, the model may
+# store "Camilla Holmström" with bytes that differ from Python's UTF-8 "ö".
+#
+# _resolve_speaker_key() builds a normalised lookup on first call and caches
+# it for the lifetime of the process. It normalises names to ASCII so that
+# "Holmström" and "Holmstrom" (or any garbled variant) map to the same key.
+
+
+_speaker_key_cache: dict[str, str] = {}   # normalised_name → actual model key
+
+
+def _ascii_fold(name: str) -> str:
+    """Fold a Unicode string to closest ASCII equivalent for fuzzy matching."""
+    nfkd = unicodedata.normalize("NFKD", name)
+    return nfkd.encode("ascii", "ignore").decode("ascii").lower().strip()
+
+
+def _resolve_speaker_key(model, speaker_name: str) -> str:
+    """
+    Resolve a speaker name to the exact key used in model.speaker_manager.speakers.
+    Handles encoding mismatches by falling back to ASCII-normalised comparison.
+    Raises KeyError only if no match is found at all.
+    """
+    speakers = model.speaker_manager.speakers
+
+    # Fast path — exact match
+    if speaker_name in speakers:
+        return speaker_name
+
+    # Build the normalised cache once per process
+    global _speaker_key_cache
+    if not _speaker_key_cache:
+        for key in speakers:
+            _speaker_key_cache[_ascii_fold(key)] = key
+
+    # Try normalised lookup
+    folded = _ascii_fold(speaker_name)
+    if folded in _speaker_key_cache:
+        resolved = _speaker_key_cache[folded]
+        print(f"      Speaker key resolved: '{speaker_name}' → '{resolved}'")
+        return resolved
+
+    # Nothing matched — raise with helpful message
+    raise KeyError(
+        f"Speaker '{speaker_name}' not found in XTTS model. "
+        f"Available: {list(speakers.keys())[:10]}..."
+    )
+
+
 def _infer(
     model, config, text: str, speaker_name: str,
     temperature: float = 0.65,
@@ -257,8 +346,9 @@ def _infer(
     top_k: int = 50,
     top_p: float = 0.85,
 ) -> np.ndarray:
-    gpt_cond_latent   = model.speaker_manager.speakers[speaker_name]["gpt_cond_latent"]
-    speaker_embedding = model.speaker_manager.speakers[speaker_name]["speaker_embedding"]
+    resolved_name     = _resolve_speaker_key(model, speaker_name)
+    gpt_cond_latent   = model.speaker_manager.speakers[resolved_name]["gpt_cond_latent"]
+    speaker_embedding = model.speaker_manager.speakers[resolved_name]["speaker_embedding"]
 
     out = model.inference(
         text=text,
@@ -276,14 +366,23 @@ def _infer(
     return _trim_trailing_noise(wav, text)
 
 
-def render_segment(model, config, text: str, speaker: str, tone: str) -> np.ndarray:
+def render_segment(
+    model, config, text: str, speaker: str, tone: str,
+    speed_variant: float = 1.0,
+) -> np.ndarray:
+    """Render a segment with tone-driven parameters and optional speed_variant.
+
+    speed_variant is a character-level multiplier applied ON TOP of the tone
+    speed. Used by the overflow system to make reused voices sound distinct.
+    1.0 = no change, 0.85 = deeper/slower, 1.15 = brighter/faster.
+    """
     text      = clean_text_for_tts(text)
     profile   = TONE_PROFILES.get(tone, TONE_PROFILES["neutral"])
     chunks    = _split_for_xtts(text)
     gap       = np.zeros(int(SAMPLE_RATE * SUBSEG_GAP_MS / 1000), dtype=np.float32)
 
     if len(chunks) > 1:
-        print(f"      ↳ split into {len(chunks)} sub-segments (text: {len(text)} chars)")
+        print(f"      -> split into {len(chunks)} sub-segments (text: {len(text)} chars)")
 
     parts = []
     for chunk in chunks:
@@ -304,9 +403,10 @@ def render_segment(model, config, text: str, speaker: str, tone: str) -> np.ndar
 
     combined = np.concatenate(parts) if len(parts) > 1 else parts[0]
 
-    # Apply speed profile
-    if profile["speed"] != 1.0:
-        target_len = int(len(combined) / profile["speed"])
+    # Apply speed: tone speed * character speed_variant
+    final_speed = profile["speed"] * speed_variant
+    if final_speed != 1.0:
+        target_len = int(len(combined) / final_speed)
         combined   = sps.resample(combined, target_len).astype(np.float32)
 
     return combined

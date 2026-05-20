@@ -34,6 +34,7 @@ import re
 import os
 import time
 from groq import Groq
+from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -60,15 +61,29 @@ def reset_token_tracker():
     _token_tracker["total_calls"]  = 0
 
 
-# ── API Key Config (up to 6 keys) ────────────────────────────────────────────
+# ── API Key Config (up to 6 Groq keys + 1 OpenRouter fallback) ───────────────
 _API_KEYS = [
     os.environ.get(f"GROQ_API_KEY_{i}", "")
     for i in range(1, 7)
 ]
 MODEL = "llama-3.3-70b-versatile"
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct"
 
 clients = [Groq(api_key=k) for k in _API_KEYS if k]
 print(f"  Groq API keys loaded: {len(clients)}")
+
+_openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+_openrouter_client: OpenAI | None = (
+    OpenAI(
+        api_key=_openrouter_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    if _openrouter_key else None
+)
+if _openrouter_client:
+    print("  OpenRouter fallback client loaded (Llama 3.3 70B Instruct).")
+else:
+    print("  OpenRouter fallback NOT configured (OPENROUTER_API_KEY missing).")
 
 _client_index = 0
 
@@ -78,6 +93,95 @@ def _get_client() -> Groq:
     client = clients[_client_index % len(clients)]
     _client_index += 1
     return client
+
+
+def _call_openrouter(user_message: str, label: str = "") -> str | None:
+    """
+    Fallback to OpenRouter (Llama 3.3 70B Instruct) when all Groq keys
+    are rate-limited.  No token-per-minute limit on this endpoint, but
+    responses may be slower.
+
+    Returns the raw response string, or None if unavailable / errored.
+    """
+    if not _openrouter_client:
+        return None
+
+    # OpenRouter's instruct model doesn't escape quotes inside JSON strings
+    # as reliably as Groq's versatile model. Append an explicit reminder.
+    _ESCAPING_REMINDER = (
+        "\n\nJSON ESCAPING CRITICAL: Every double-quote character that appears "
+        "INSIDE a string value MUST be escaped with a backslash: \\\" "
+        "For example: {\"text\": \"She said \\\"hello\\\" to him.\"} "
+        "Never output a bare unescaped \" inside a JSON string value."
+    )
+    or_message = user_message + _ESCAPING_REMINDER
+
+    print(f"  ⏳ [{label}] Falling back to OpenRouter (Llama 3.3 70B)...")
+    try:
+        response = _openrouter_client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": or_message},
+            ],
+            temperature=0.1,
+            max_tokens=8192,
+            timeout=240,
+        )
+        raw           = response.choices[0].message.content.strip()
+        finish_reason = response.choices[0].finish_reason
+        if response.usage:
+            _track(response.usage, f"{label}-openrouter")
+        if finish_reason == "length":
+            print(f"  ⚠ [{label}] OpenRouter output truncated — running continuation...")
+            raw = _continue_until_complete_openrouter(user_message, raw, label)
+        print(f"  ✓ [{label}] OpenRouter response received.")
+        return raw
+    except Exception as e:
+        print(f"  ✗ OpenRouter error [{label}]: {e}")
+        return None
+
+
+def _continue_until_complete_openrouter(
+    original_user_message: str,
+    partial_raw: str,
+    label: str,
+) -> str:
+    """Continuation loop for OpenRouter (mirrors the Groq version)."""
+    accumulated = partial_raw
+    for pass_num in range(1, MAX_CONTINUATIONS + 1):
+        print(f"  → OpenRouter continuation pass {pass_num}/{MAX_CONTINUATIONS} [{label}]...")
+        try:
+            continuation = _openrouter_client.chat.completions.create(
+                model=OPENROUTER_MODEL,
+                messages=[
+                    {"role": "system",    "content": SYSTEM_PROMPT},
+                    {"role": "user",      "content": original_user_message},
+                    {"role": "assistant", "content": accumulated},
+                    {"role": "user",      "content":
+                        "Your response was cut off. Continue the JSON array exactly from where "
+                        "you stopped. Do not repeat any segments already written. "
+                        "Continue from the last complete segment and finish the array with ]."
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=8192,
+                timeout=120,
+            )
+            if continuation.usage:
+                _track(continuation.usage, f"cont-{label}-openrouter-{pass_num}")
+            continuation_text = continuation.choices[0].message.content.strip()
+            finish_reason     = continuation.choices[0].finish_reason
+            accumulated       = _merge_partial(accumulated, continuation_text)
+            if finish_reason != "length":
+                print(f"  ✓ OpenRouter continuation complete [{label}] after {pass_num} pass(es).")
+                return accumulated
+        except Exception as e:
+            print(f"  ✗ OpenRouter continuation error [{label}]: {e}")
+            break
+    print(f"  ✗ OpenRouter max continuations reached [{label}]. Force-closing array.")
+    accumulated = accumulated.rstrip().rstrip(",") + "\n]"
+    return "[" + accumulated.strip().lstrip("[")
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -90,20 +194,14 @@ MERGE_CAP          = 400    # stop merging into a segment once it exceeds this l
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-SYSTEM_PROMPT = """You are a verbatim audiobook transcriber. Your ONLY job is to label every sentence of the input text with speaker and tone metadata for TTS rendering.
+SYSTEM_PROMPT = """You are a verbatim audiobook transcriber. Your ONLY job is to label every sentence of the input text with tone metadata for TTS rendering.
 
 CRITICAL RULE: You must include EVERY sentence from the input, without exception. Do not skip, summarize, condense, or paraphrase any content. Every sentence that exists in the input must appear in your output with its text preserved exactly word-for-word. Retain 100% of the text. Do not change any word or its position.
 
 OUTPUT: Return ONLY a valid JSON array. No markdown, no explanation.
 
 SCHEMA: Each segment needs exactly:
-{"index": int, "speaker": str, "type": str, "tone": str, "text": str}
-
-SPEAKERS:
-- narrator: all narration, description, action beats, and attribution tags (e.g. "he said", "she thought")
-- character name in lowercase_underscore for dialogue AND thoughts
-- never use pronouns (he/she) as speaker names
-- if the speaker is unknown, unnamed, or cannot be identified → use narrator
+{"index": int, "type": str, "tone": str, "text": str}
 
 TYPES: dialogue | narration | action | thought
 
@@ -124,64 +222,26 @@ TONES: neutral | calm | tense | whisper | angry | sad | excited | cold | fearful
 - pick least extreme tone when uncertain
 
 RULES:
-- Strip quotes from dialogue text
+- Strip quotes from dialogue/thought text
 - PRESERVE all text exactly word-for-word — never rephrase, shorten, or merge meaning from multiple sentences
 - Escape any double quotes inside text values with a backslash: \\"Blackout Day\\" not "Blackout Day"
 - Merge interrupted dialogue: "I won't," she said, "do it" → one segment
 - Attribution tag (e.g. "he said", "she thought") becomes SEPARATE narration segment
 
-THOUGHTS (CRITICAL — speaker is the CHARACTER, not narrator):
-When text in quotes represents a character's inner thoughts (indicated by words like
-"thought", "wondered", "asked herself", "exclaimed in his heart", "said to himself"),
-the speaker MUST be the CHARACTER who is thinking, NOT the narrator.
+THOUGHTS (CRITICAL):
+When text in quotes represents a character's inner thoughts (indicated by words like "thought", "wondered", "asked herself"), create a separate thought segment.
+Example input:  "Oh no, what do I do?" thought Idan, panicking.
+Correct output: segment 1 → type: thought, text: "Oh no, what do I do?"
+                segment 2 → type: narration, text: "thought Idan, panicking."
 
-  Example input:  "Oh no, what do I do?" thought Idan, panicking.
-  Correct output: segment 1 → speaker: idan, type: thought, text: "Oh no, what do I do?"
-                  segment 2 → speaker: narrator, type: narration, text: "thought Idan, panicking."
+MIXED PARAGRAPHS (CRITICAL):
+When a paragraph contains dialogue FOLLOWED or PRECEDED by narration, you MUST create SEPARATE segments for EACH part. Example:
+  Input:  "W-who are you?" Arabel spoke first, addressing Idan. Unlike him...
+  Output: segment 1 → type: dialogue, text: "W-who are you?"
+          segment 2 → type: narration, text: "Arabel spoke first, addressing Idan. Unlike him..."
 
-  Example input:  "H-husband! How is this possible?" Arabel thought, looking at Idan.
-  Correct output: segment 1 → speaker: arabel_morgan, type: thought, text: "H-husband! How is this possible?"
-                  segment 2 → speaker: narrator, type: narration, text: "Arabel thought, looking at Idan."
-
-  WRONG: speaker: narrator, type: thought ← NEVER do this for quoted thoughts
-
-MIXED PARAGRAPHS (CRITICAL — DO NOT SKIP):
-When a paragraph contains dialogue FOLLOWED or PRECEDED by narration,
-you MUST create SEPARATE segments for EACH part. Example:
-
-  Input:  "W-who are you?" Arabel spoke first, addressing Idan. Unlike him,
-          who was still reeling from the shock, she had grown up in an
-          influential family and was used to the pressure.
-
-  Output: segment 1 → speaker: arabel, type: dialogue, text: "W-who are you?"
-          segment 2 → speaker: narrator, type: narration, text: "Arabel spoke
-          first, addressing Idan. Unlike him, who was still reeling from the
-          shock, she had grown up in an influential family and was used to
-          the pressure."
-
-NEVER drop the narration around dialogue. Every sentence must appear.
-
-GROUP / SIMULTANEOUS DIALOGUE (CRITICAL):
-When multiple characters speak the SAME line together (indicated by "said together",
-"in unison", "chorused", "exclaimed together", or similar group attribution), produce
-ONLY ONE dialogue segment using the FIRST named character as speaker. The attribution
-line becomes a SEPARATE narration segment with speaker: narrator.
-
-  Example input:  "We must leave now!" — Nemo, Eulalia and Milica said together.
-  Correct output: segment 1 → speaker: nemo, type: dialogue, text: "We must leave now!"
-                  segment 2 → speaker: narrator, type: narration, text: "— Nemo, Eulalia and Milica said together."
-
-  WRONG: Creating separate dialogue segments with the same text for each speaker — NEVER do this.
-
-NARRATION vs DIALOGUE (CRITICAL):
-Any sentence WITHOUT quoted text (inside "" marks) is ALWAYS type: narration with
-speaker: narrator — even if it starts with or mentions a character's name.
-Only type: dialogue and type: thought may have a non-narrator speaker.
-
-  Example input:  Eulalia joined the conversation, sharing the information she had recently received.
-  Correct output: segment 1 → speaker: narrator, type: narration, text: "Eulalia joined the conversation, sharing the information she had recently received."
-
-  WRONG: speaker: eulalia, type: narration ← NEVER assign a character as speaker for narration or action segments.
+GROUP / SIMULTANEOUS DIALOGUE:
+Produce ONLY ONE dialogue segment even if multiple characters speak. The attribution line becomes a SEPARATE narration segment.
 """
 
 
@@ -189,15 +249,13 @@ Only type: dialogue and type: thought may have a non-narrator speaker.
 #  MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════
 
-def parse_chapter(text: str, known_characters: list[str]) -> list[dict]:
-    character_list = ", ".join(known_characters) if known_characters else "none yet"
-
+def parse_chapter(text: str) -> list[dict]:
     # ── Pass 1: full chapter ─────────────────────────────────────────────
     key_num = (_client_index % len(clients)) + 1
     print(f"  Sending to Groq parser (key {key_num})...")
     t0     = time.perf_counter()
     client = _get_client()
-    raw    = _call_groq(client, _build_message(text, character_list), label="pass-1")
+    raw    = _call_groq(client, _build_message(text), label="pass-1")
 
     segments = _extract_and_validate(raw, index_offset=0)
     segments = _dedup_consecutive_dialogue(segments)
@@ -223,7 +281,7 @@ def parse_chapter(text: str, known_characters: list[str]) -> list[dict]:
             repair_client = _get_client()
             repair_raw    = _call_groq(
                 repair_client,
-                _build_message(repair_text, character_list),
+                _build_message(repair_text),
                 label="repair"
             )
 
@@ -302,12 +360,11 @@ def _inject_missing_narration(source: str, segments: list[dict]) -> list[dict]:
             continue
 
         # ── Split-dialogue check ──────────────────────────────────
-        # If the next segment is same-speaker dialogue, check whether
+        # If the next segment is dialogue, check whether
         # it's inside the SAME quoted string (LLM split a long quote)
         # or a SEPARATE quoted string (with narration between them).
         if (seg_idx + 1 < len(segments)
-                and segments[seg_idx + 1].get("type") == "dialogue"
-                and segments[seg_idx + 1].get("speaker") == seg.get("speaker")):
+                and segments[seg_idx + 1].get("type") == "dialogue"):
             next_probe = segments[seg_idx + 1]["text"][:25].lower()
             # Check if the next dialogue's text appears BEFORE the closing "
             between = source_lower[pos + len(dialogue_text):close_quote]
@@ -355,7 +412,6 @@ def _inject_missing_narration(source: str, segments: list[dict]) -> list[dict]:
 
         if not captured:
             result.append({
-                "speaker": "narrator",
                 "type":    "narration",
                 "tone":    "neutral",
                 "text":    after_text,
@@ -486,11 +542,10 @@ def _merge_repair(
 #  GROQ CALLS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_message(text: str, character_list: str) -> str:
+def _build_message(text: str) -> str:
     return (
         f"Parse the following text exactly as given. "
         f"Include every sentence verbatim.\n\n"
-        f"KNOWN CHARACTERS (use these exact name keys):\n{character_list}\n\n"
         f"TEXT:\n{text}"
     )
 
@@ -607,12 +662,17 @@ def _call_groq(client: Groq, user_message: str, label: str = "", retries: int = 
                 else:
                     raise
 
-        # All keys exhausted this round
-        if rate_limited == num_keys and retry_times:
-            wait = max(1, min(retry_times))  # smallest wait across all keys
-            print(f"  All {num_keys} keys rate-limited (round {round_num+1}/{retries}) "
-                  f"— waiting {wait:.0f}s (shortest key cooldown)...")
-            time.sleep(wait)
+        # All keys exhausted this round — try OpenRouter before sleeping
+        if rate_limited == num_keys:
+            openrouter_result = _call_openrouter(user_message, label)
+            if openrouter_result is not None:
+                return openrouter_result
+            # OpenRouter also unavailable — fall back to timed wait
+            if retry_times:
+                wait = max(1, min(retry_times))  # smallest wait across all keys
+                print(f"  All {num_keys} Groq keys rate-limited (round {round_num+1}/{retries}) "
+                      f"— waiting {wait:.0f}s (shortest key cooldown)...")
+                time.sleep(wait)
 
     raise RuntimeError(f"Groq [{label}] failed after {retries} retries.")
 
@@ -707,7 +767,12 @@ def _repair_json(raw: str) -> str:
     1. Unescaped double quotes inside string values
     2. Truncated array — force-close if missing ]
     3. Trailing comma before closing bracket
+    4. Missing index value (e.g. "index":,) — replace with 0
     """
+    # Step 0 — fix missing index value specifically ("index":, or "index": })
+    # ONLY targets the numeric index field to avoid corrupting text values.
+    raw = re.sub(r'"index"\s*:\s*(?=[,}])', '"index": 0', raw)
+
     # Step 1 — fix unescaped double quotes inside "text" values.
     # Targets the text field specifically since that's where prose comes in.
     # Pattern: finds "text": "..." and re-escapes any unescaped internal quotes.
@@ -745,8 +810,18 @@ def _extract_and_validate(raw: str, index_offset: int = 0) -> list[dict]:
     start = raw.find("[")
     end   = raw.rfind("]")
 
-    if start == -1 or end == -1:
+    if start == -1:
         raise ValueError(f"Parser did not return a JSON array.\nRaw:\n{raw[:500]}")
+
+    # If closing bracket is missing (truncated response), try to close the array
+    if end == -1 or end < start:
+        print("  Warning: JSON array not closed — attempting to close truncated response...")
+        last_brace = raw.rfind("}", start)
+        if last_brace != -1:
+            raw = raw[:last_brace + 1] + "\n]"
+            end = len(raw) - 1
+        else:
+            raise ValueError(f"Parser did not return a JSON array.\nRaw:\n{raw[:500]}")
 
     json_str = raw[start:end + 1]
 
@@ -754,23 +829,26 @@ def _extract_and_validate(raw: str, index_offset: int = 0) -> list[dict]:
     try:
         segments = json.loads(json_str)
     except json.JSONDecodeError as e:
-        print(f"  Warning: JSON parse failed ({e}), attempting repair...")
-
-        # Second attempt — after repair
+        # Second attempt — whole-blob repair (handles simple cases: single bad
+        # quote, truncated array, trailing comma).
         repaired = _repair_json(json_str)
         try:
             segments = json.loads(repaired)
             print(f"  Repair succeeded.")
-        except json.JSONDecodeError as e2:
-            # Third attempt — extract only complete segments using regex
-            print(f"  Repair failed ({e2}), extracting partial segments...")
+        except json.JSONDecodeError:
+            # Third attempt — per-segment schema extraction.  This is the
+            # reliable path when there are many scattered unescaped quotes
+            # (common with OpenRouter's instruct model).  _fix_segment_object
+            # extracts each field individually so bad quotes in text don't
+            # contaminate other segments.
+            print(f"  JSON repair: switching to per-segment extraction...")
             segments = _extract_partial_segments(json_str)
             if not segments:
                 raise ValueError(
                     f"JSON parse failed and no segments could be recovered.\n"
                     f"Original error: {e}\nRaw:\n{raw[start:start + 500]}"
                 )
-            print(f"  Recovered {len(segments)} segments from partial JSON.")
+            print(f"  Recovered {len(segments)} segments.")
 
     if not isinstance(segments, list):
         raise ValueError(f"Expected JSON array, got: {type(segments)}")
@@ -778,12 +856,54 @@ def _extract_and_validate(raw: str, index_offset: int = 0) -> list[dict]:
     return _validate_segments(segments, index_offset)
 
 
+def _fix_segment_object(obj_str: str) -> dict | None:
+    """
+    Schema-aware recovery for a single broken segment object.
+
+    Since every segment has a fixed schema:
+        {"index": N, "speaker": "...", "type": "...", "tone": "...", "text": "..."}
+    we can extract each field individually with targeted regex instead
+    of relying on json.loads() — making it immune to unescaped quotes
+    anywhere in the text field.
+    """
+    result: dict = {}
+
+    # Extract numeric index
+    m = re.search(r'"index"\s*:\s*(\d+)', obj_str)
+    result["index"] = int(m.group(1)) if m else 0
+
+    # Extract simple string fields (type / tone)
+    for field in ("type", "tone"):
+        m = re.search(rf'"{field}"\s*:\s*"([^"]+?)"', obj_str)
+        if m:
+            result[field] = m.group(1)
+
+    # Extract text field: grab everything from after "text": " to the very
+    # last " in the object (the one just before the closing }).
+    # This is greedy by design — it tolerates any unescaped quotes inside.
+    m = re.search(r'"text"\s*:\s*"(.*)', obj_str, re.DOTALL)
+    if m:
+        raw_text = m.group(1)
+        # Strip trailing JSON boilerplate: last optional comma, whitespace, }
+        raw_text = re.sub(r'"?\s*,?\s*}?\s*$', '', raw_text).strip()
+        # Strip a trailing lone quote if it's the field closer
+        if raw_text.endswith('"'):
+            raw_text = raw_text[:-1]
+        result["text"] = raw_text
+
+    if "text" not in result or "type" not in result:
+        return None
+
+    return result
+
+
 def _extract_partial_segments(json_str: str) -> list[dict]:
     """
     Last-resort recovery: use regex to extract every complete
     {...} object from a broken JSON array individually.
-    Each object is parsed independently so one bad segment
-    doesn't poison the rest.
+    Each object is first tried with json.loads(); on failure,
+    _fix_segment_object() is used as a schema-aware fallback
+    so that no segment is abandoned without a recovery attempt.
     """
     # Match complete JSON objects at the top level
     pattern = re.compile(r'\{[^{}]*\}', re.DOTALL)
@@ -791,13 +911,22 @@ def _extract_partial_segments(json_str: str) -> list[dict]:
 
     recovered = []
     for i, match in enumerate(matches):
+        # Fast path: valid JSON
         try:
             obj = json.loads(match)
             if isinstance(obj, dict) and "text" in obj:
                 recovered.append(obj)
+                continue
         except json.JSONDecodeError:
+            pass
+
+        # Slow path: schema-aware field-by-field extraction
+        obj = _fix_segment_object(match)
+        if obj:
+            print(f"  Rescued segment {i} via schema extraction.")
+            recovered.append(obj)
+        else:
             print(f"  Skipping unrecoverable segment {i}")
-            continue
 
     return recovered
 
@@ -814,26 +943,15 @@ PRONOUN_NAMES = {"he", "she", "they", "it", "him", "her", "them", "his", "hers"}
 def _validate_segments(segments: list, index_offset: int = 0) -> list:
     cleaned = []
     for seg in segments:
-        seg.setdefault("speaker", "narrator")
         seg.setdefault("type",    "narration")
         seg.setdefault("tone",    "neutral")
         seg.setdefault("text",    "")
-
-        if seg["speaker"].lower() in PRONOUN_NAMES:
-            seg["speaker"] = "narrator"
-
-        seg["speaker"] = seg["speaker"].lower().replace(" ", "_").strip()
 
         if seg["tone"] not in VALID_TONES:
             seg["tone"] = "neutral"
 
         if seg["type"] not in VALID_TYPES:
             seg["type"] = "narration"
-
-        # Narration and action segments must always be spoken by the narrator.
-        # Only dialogue and thought may have a character as speaker.
-        if seg["type"] in ("narration", "action") and seg["speaker"] != "narrator":
-            seg["speaker"] = "narrator"
 
         if not seg["text"].strip():
             continue
@@ -891,7 +1009,7 @@ def _dedup_consecutive_dialogue(segments: list[dict]) -> list[dict]:
 
 def _merge_short_segments(segments: list[dict], source_text: str) -> list[dict]:
     """
-    Merge consecutive same-speaker/tone/type segments where the incoming
+    Merge consecutive same-tone/type segments where the incoming
     segment text is under 120 chars, subject to:
       - Chapter heading protection: the first segment (index 0) is never
         merged into — it always remains its own segment.
@@ -924,10 +1042,9 @@ def _merge_short_segments(segments: list[dict], source_text: str) -> list[dict]:
             merged.append(seg)
             continue
 
-        # Rule 3: speaker / tone / type must match
+        # Rule 3: tone / type must match
         if (
-            merged[-1]["speaker"] != seg["speaker"]
-            or merged[-1]["tone"]  != seg["tone"]
+            merged[-1]["tone"]  != seg["tone"]
             or merged[-1]["type"]  != seg["type"]
         ):
             merged.append(seg)

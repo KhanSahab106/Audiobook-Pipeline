@@ -201,28 +201,33 @@ def extract_text(html: str) -> str:
 
 
 def _clean_text(text: str) -> str:
-    """Normalize whitespace and blank lines."""
+    """Normalize whitespace: exactly one blank line between paragraphs."""
     # Strip each line
     lines = [line.strip() for line in text.splitlines()]
 
-    # Collapse runs of blank lines into at most two
+    # Collapse ANY run of blank lines into exactly one blank line
     cleaned = []
-    blank_count = 0
+    prev_blank = False
     for line in lines:
         if not line:
-            blank_count += 1
-            if blank_count <= 2:
+            if not prev_blank:
                 cleaned.append("")
+            prev_blank = True
         else:
-            blank_count = 0
+            prev_blank = False
             cleaned.append(line)
 
     result = "\n".join(cleaned).strip()
 
-    # Strip leading boilerplate (novel title, site name, etc.)
+    # Replace curly braces with double quotes (some novels use {…} for
+    # dialogue/thoughts via mental link — the parser expects standard quotes)
+    result = result.replace("\u201c", '"').replace("\u201d", '"')  # smart quotes
+    result = result.replace("{", '"').replace("}", '"')
+
+    # Strip leading boilerplate (novel title, site name, duplicate headings)
     result = _strip_leading_boilerplate(result)
 
-    # Strip common novel-site trailing boilerplate
+    # Strip common novel-site trailing boilerplate (author notes, Discord, etc.)
     result = _strip_trailing_boilerplate(result)
 
     return result
@@ -236,13 +241,32 @@ _CHAPTER_HEADING = re.compile(
 
 
 def _strip_leading_boilerplate(text: str) -> str:
-    """Remove lines before the first 'Chapter N:' heading (novel title, site name, etc.)."""
+    """
+    Remove lines before the chapter heading and de-duplicate the title.
+
+    If the title appears twice (common on novelbin), keep only the second
+    occurrence so the chapter text starts with exactly one title line.
+    """
     lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if _CHAPTER_HEADING.match(line.strip()):
-            return "\n".join(lines[i:]).strip()
-    # No chapter heading found — return as-is
-    return text
+
+    # Find ALL chapter heading lines
+    heading_indices = [
+        i for i, line in enumerate(lines)
+        if _CHAPTER_HEADING.match(line.strip())
+    ]
+
+    if not heading_indices:
+        return text
+
+    # If the same heading appears twice, skip to the last occurrence
+    if len(heading_indices) >= 2:
+        first_text = lines[heading_indices[0]].strip().lower()
+        last_text  = lines[heading_indices[-1]].strip().lower()
+        if first_text == last_text:
+            return "\n".join(lines[heading_indices[-1]:]).strip()
+
+    # Otherwise just skip everything before the first heading
+    return "\n".join(lines[heading_indices[0]:]).strip()
 
 
 # Lines that commonly appear at the bottom of novel-reading sites
@@ -253,28 +277,62 @@ _BOILERPLATE_PATTERNS = re.compile(
     r"|Previous\s+Chapter"
     r"|Next\s+Chapter"
     r"|Table\s+of\s+Contents"
-    r"|← Prev"
-    r"|Next →"
+    r"|\u2190 Prev"
+    r"|Next \u2192"
     r"|Share\s+this"
     r"|Rate\s+this"
     r"|Add\s+to\s+library"
     r"|Bookmark"
     r"|Download\s+app"
+    r"|I\s+would\s+like\s+to\s+express\s+my\s+gratitude"
+    r"|Your\s+support\s+allows"
+    r"|Join\s+my\s+(?:newly\s+)?(?:created\s+)?Discord"
+    r"|(?:https?://)?discord\.gg/"
+    r"|(?:https?://)?patreon\.com/"
+    r"|power\s+stones?"
+    r"|golden\s+tickets?"
     r").*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Markers that start an entire author/translator section — everything from
+# this line onwards gets cut, regardless of what follows.
+_SECTION_CUTOFF = re.compile(
+    r"^("
+    r"From\s+the\s+author"
+    r"|Author['\u2019]?s?\s+note"
+    r"|Translator['\u2019]?s?\s+(?:note|thought)"
+    r"|transalator\s+thought"
+    r")s?[\s:]*$",
+    re.IGNORECASE,
+)
+
 
 def _strip_trailing_boilerplate(text: str) -> str:
-    """Remove common novel-site trailing lines."""
+    """
+    Remove non-story text from the end of a chapter.
+
+    Pass 1: Scan forward for section markers like "From the author:" and
+            truncate everything from that line onwards.
+    Pass 2: Walk backwards removing individual boilerplate lines
+            (Discord links, gratitude, navigation, etc.).
+    """
     lines = text.rstrip().splitlines()
-    # Walk backwards, removing boilerplate or blank lines
+
+    # ── Pass 1: section cutoff (e.g. "From the author:") ──────────────
+    for i, line in enumerate(lines):
+        if _SECTION_CUTOFF.match(line.strip()):
+            lines = lines[:i]
+            break
+
+    # ── Pass 2: walk backwards, strip individual boilerplate lines ────
     while lines:
         stripped = lines[-1].strip()
         if not stripped or _BOILERPLATE_PATTERNS.match(stripped):
             lines.pop()
         else:
             break
+
     return "\n".join(lines).rstrip()
 
 
@@ -435,7 +493,7 @@ def main():
             # ── 10-minute cooldown every 10 chapters ──────────────────
             if (i + 1) % 10 == 0:
                 print(f"  {'':>{len(label)}} 10 chapters done -- cooling down for 10 minutes...\n")
-                time.sleep(600)
+                time.sleep(300)
             else:
                 # ── Random delay to avoid rate-limiting ───────────────
                 delay = random.uniform(15, 25)

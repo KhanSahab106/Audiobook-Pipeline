@@ -91,7 +91,8 @@ def _try_render(
     text: str,
     speaker: str,
     tone: str,
-    label: str
+    label: str,
+    speed_variant: float = 1.0,
 ) -> np.ndarray | None:
     """
     Attempt to render text up to MAX_RETRIES times.
@@ -100,7 +101,8 @@ def _try_render(
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             print(f"      [{label}] attempt {attempt}/{MAX_RETRIES}...")
-            return render_segment(tts, tts_config, text, speaker, tone)
+            return render_segment(tts, tts_config, text, speaker, tone,
+                                 speed_variant=speed_variant)
         except Exception as e:
             print(f"      [{label}] attempt {attempt} failed: {e}")
             if attempt < MAX_RETRIES:
@@ -113,7 +115,8 @@ def render_with_fallback(
     tts_config,
     seg: dict,
     xtts_speaker: str,
-    failure_log: list
+    failure_log: list,
+    speed_variant: float = 1.0,
 ) -> np.ndarray:
     """
     Render a segment with 5-stage fallback strategy.
@@ -127,16 +130,12 @@ def render_with_fallback(
               Strip non-ASCII, fix punctuation, retry with same speaker.
               Handles encoding issues from source text.
 
-    Stage 3 — Fallback speaker
-              Replace character voice with Ana Florence.
-              Handles corrupted or missing speaker latents.
-
-    Stage 4 — Split render
+    Stage 3 — Split render
               Break text at sentence boundaries into ≤150 char parts.
-              Render each part individually with fallback speaker.
+              Render each part individually.
               Handles segments that are too long for the model.
 
-    Stage 5 — Audible placeholder
+    Stage 4 — Audible placeholder
               All strategies exhausted. Insert tone marker + silence.
               Log segment details for manual fix after batch run.
     """
@@ -146,7 +145,8 @@ def render_with_fallback(
 
     # ── Stage 1: Normal render ───────────────────────────────
     print(f"    → Stage 1: normal render")
-    wav = _try_render(tts, tts_config, text, xtts_speaker, tone, "normal")
+    wav = _try_render(tts, tts_config, text, xtts_speaker, tone, "normal",
+                      speed_variant=speed_variant)
     if wav is not None:
         return wav
 
@@ -154,7 +154,8 @@ def render_with_fallback(
     cleaned = clean_text_for_tts(text)
     if cleaned and cleaned != text:
         print(f"    → Stage 2: cleaned text")
-        wav = _try_render(tts, tts_config, cleaned, xtts_speaker, tone, "cleaned")
+        wav = _try_render(tts, tts_config, cleaned, xtts_speaker, tone, "cleaned",
+                          speed_variant=speed_variant)
         if wav is not None:
             failure_log.append({
                 "index":    index,
@@ -166,31 +167,10 @@ def render_with_fallback(
             })
             return wav
 
-    # ── Stage 3: Fallback speaker ────────────────────────────
-    if xtts_speaker != FALLBACK_SPEAKER:
-        print(f"    → Stage 3: fallback speaker ({FALLBACK_SPEAKER})")
-        wav = _try_render(
-            tts, tts_config,
-            cleaned or text,
-            FALLBACK_SPEAKER,
-            tone,
-            "fallback_spk"
-        )
-        if wav is not None:
-            failure_log.append({
-                "index":            index,
-                "stage":            3,
-                "strategy":         "fallback_speaker",
-                "original_speaker": xtts_speaker,
-                "used_speaker":     FALLBACK_SPEAKER,
-                "text":             text
-            })
-            return wav
-
-    # ── Stage 4: Split render ────────────────────────────────
+    # ── Stage 3: Split render ────────────────────────────────
     parts = split_segment_text(cleaned or text, max_chars=150)
     if len(parts) > 1:
-        print(f"    → Stage 4: split into {len(parts)} parts")
+        print(f"    → Stage 3: split into {len(parts)} parts")
         part_wavs   = []
         gap_silence = np.zeros(int(SAMPLE_RATE * 0.1), dtype=np.float32)
         all_ok      = True
@@ -199,7 +179,7 @@ def render_with_fallback(
             wav = _try_render(
                 tts, tts_config,
                 part,
-                FALLBACK_SPEAKER,
+                xtts_speaker,
                 "neutral",
                 f"part_{j+1}"
             )
@@ -214,20 +194,20 @@ def render_with_fallback(
         if all_ok and part_wavs:
             failure_log.append({
                 "index":    index,
-                "stage":    4,
+                "stage":    3,
                 "strategy": "split_render",
                 "parts":    len(parts),
                 "text":     text
             })
             return np.concatenate(part_wavs)
 
-    # ── Stage 5: Placeholder ─────────────────────────────────
-    print(f"    → Stage 5: all strategies failed")
+    # ── Stage 4: Placeholder ─────────────────────────────────
+    print(f"    → Stage 4: all strategies failed")
     print(f"    ✗ MANUAL FIX REQUIRED — segment {index}")
     print(f"      Text: {text[:80]}")
     failure_log.append({
         "index":    index,
-        "stage":    5,
+        "stage":    4,
         "strategy": "placeholder_inserted",
         "text":     text,
         "speaker":  xtts_speaker,

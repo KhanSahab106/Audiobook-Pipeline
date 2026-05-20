@@ -224,6 +224,12 @@ def extract_dormant_characters(novel_md_content: str) -> set[str]:
     return {k for k, v in entries.items() if v["status"] == "dormant"}
 
 
+def extract_active_characters(novel_md_content: str) -> set[str]:
+    """Return the set of character keys with status: active."""
+    entries = _parse_character_entries(novel_md_content)
+    return {k for k, v in entries.items() if v["status"] == "active"}
+
+
 def extract_newly_dormant(old_md: str, new_md: str) -> set[str]:
     """
     Return characters that went from active (or absent) in old_md
@@ -237,11 +243,15 @@ def extract_newly_dormant(old_md: str, new_md: str) -> set[str]:
 def extract_reactivated(old_md: str, new_md: str) -> set[str]:
     """
     Return characters that went from dormant in old_md
-    to active (or absent) in new_md.
+    to active in new_md.
+
+    Characters that were dormant and then removed/pruned entirely
+    are NOT considered reactivated.
     """
     old_dormant = extract_dormant_characters(old_md)
-    new_dormant = extract_dormant_characters(new_md)
-    return old_dormant - new_dormant
+    new_active  = extract_active_characters(new_md)
+    # Only genuinely reactivated: was dormant AND is now explicitly active
+    return old_dormant & new_active
 
 
 def parse_chapter_range(arg: str) -> tuple[int, int | None]:

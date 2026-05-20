@@ -3,6 +3,8 @@ venv/
 
 # Novel data (large text/audio files)
 novels/
+Training_voices/
+voice_tests/
 
 # Temporary / scratch chapters
 New folder/

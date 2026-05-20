@@ -41,6 +41,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 from registry import load_registry, get_known_characters
 
 from groq import Groq
+from openai import OpenAI
 
 SYSTEM_PROMPT = """You are a verbatim audiobook transcriber. Your ONLY job is to label every sentence of the input text with speaker and tone metadata for TTS rendering.
 
@@ -141,9 +142,24 @@ _API_KEYS = [
     for i in range(1, 7)
 ]
 MODEL = "llama-3.3-70b-versatile"
+OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct"
 
 _clients = [Groq(api_key=k) for k in _API_KEYS if k]
 print(f"  Groq API keys loaded: {len(_clients)}")
+
+_openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+_openrouter_client: OpenAI | None = (
+    OpenAI(
+        api_key=_openrouter_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    if _openrouter_key else None
+)
+if _openrouter_client:
+    print("  OpenRouter fallback client loaded (Llama 3.3 70B Instruct).")
+else:
+    print("  OpenRouter fallback NOT configured (OPENROUTER_API_KEY missing).")
+
 _client_index = 0
 
 
@@ -209,6 +225,36 @@ def call_groq_raw(text: str, known_characters: list[str]) -> dict:
                 last_error = e
                 continue
             raise
+
+    # All Groq keys exhausted — try OpenRouter fallback
+    if _openrouter_client:
+        print("  ⏳ All Groq keys rate-limited — falling back to OpenRouter (Llama 3.3 70B)...")
+        try:
+            t0 = time.perf_counter()
+            response = _openrouter_client.chat.completions.create(
+                model=OPENROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_message},
+                ],
+                temperature=0.1,
+                max_tokens=8192,
+            )
+            elapsed = time.perf_counter() - t0
+            raw           = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            usage         = response.usage
+            print(f"  ✓ OpenRouter response received in {elapsed:.1f}s.")
+            return {
+                "raw":           raw,
+                "finish_reason": finish_reason,
+                "elapsed_s":     round(elapsed, 2),
+                "input_tokens":  usage.prompt_tokens      if usage else 0,
+                "output_tokens": usage.completion_tokens  if usage else 0,
+                "total_tokens":  usage.total_tokens       if usage else 0,
+            }
+        except Exception as e:
+            print(f"  ✗ OpenRouter error: {e}")
 
     raise RuntimeError(f"All {len(_clients)} API keys are rate-limited: {last_error}")
 
